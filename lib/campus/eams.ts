@@ -107,6 +107,12 @@ export async function eamsProfile(cookies: CookieJar): Promise<EamsProfile> {
     detail.text.match(/id='photoImg'[\s\S]{0,200}?alt="([^"]{1,40})"/)?.[1] ??
     null;
 
+  if (!studentId && !name) {
+    // Silent nulls hide markup/locale drift; make the failure diagnosable.
+    const title = detail.text.match(/<title>([^<]*)<\/title>/)?.[1]?.trim() || "untitled";
+    throw new Error(`EAMS 学籍页解析失败（title "${title}", ${detail.text.length} 字节）`);
+  }
+
   return {
     studentId,
     name: name ? name.replace(/\u00a0/g, " ").trim() : null,
