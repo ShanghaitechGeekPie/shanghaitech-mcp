@@ -30,6 +30,15 @@ import {
   deriveBlackboardSession,
 } from "@/lib/campus/elearning";
 import { downloadUrl } from "@/lib/campus/download";
+import {
+  ElrcError,
+  courseInfo as elrcCourseInfo,
+  ELRC_BASE,
+  listClips as elrcListClips,
+  listCourses as elrcListCourses,
+  recordingSummary as elrcRecordingSummary,
+  transcript as elrcTranscript,
+} from "@/lib/campus/elrc";
 import { egateStudent } from "@/lib/campus/egate";
 import {
   LibspaceError,
@@ -85,6 +94,11 @@ function courseLine(c: CourseSummary): string {
   ].join(" | ");
 }
 
+function mmss(totalSeconds: number): string {
+  const s = Math.max(0, Math.round(totalSeconds));
+  return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+}
+
 function formatDeadline(iso: string | null | undefined): string {
   if (!iso) return "无截止";
   const d = new Date(iso);
@@ -98,7 +112,8 @@ function campusFailure(prefix: string, cause: unknown) {
     cause instanceof CampusSessionExpired ||
     cause instanceof LibspaceError ||
     cause instanceof EcourseError ||
-    cause instanceof ElearningError
+    cause instanceof ElearningError ||
+    cause instanceof ElrcError
       ? `${cause.message}${nested}`
       : `${err?.message ?? String(cause)}${nested}`;
   return { content: [{ type: "text" as const, text: `${prefix}：${message}` }], isError: true };
@@ -1332,11 +1347,11 @@ export function registerCampusTools(server: McpServer): void {
       inputSchema: z.object({
         query: z.string().min(1).optional().describe("关键词，多个用空格分隔，如「成绩 排名」「图书馆 座位 预约」"),
         platform: z
-          .enum(["eams", "ecourse", "elearning", "libspace", "coursebench", "egate", "campus"])
+          .enum(["eams", "ecourse", "elearning", "elrc", "libspace", "coursebench", "egate", "campus"])
           .optional()
           .describe("只在该平台内查找"),
         kind: z.enum(["tool", "entry"]).optional().describe("只要工具或只要网页入口"),
-        limit: z.number().int().min(1).max(30).default(10).describe("最多返回条数"),
+        limit: z.number().int().min(1).max(60).default(10).describe("最多返回条数"),
       }),
       outputSchema: z.object({
         count: z.number(),
@@ -1567,6 +1582,286 @@ export function registerCampusTools(server: McpServer): void {
         return structured(`下载链接（10 分钟内有效）：\n${url}`, { url, path, expiresMinutes: 10 });
       } catch (cause) {
         return campusFailure("elearning 下载链接生成失败", cause);
+      }
+    },
+  );
+
+  // ---------------------------------------------------------------- elrc
+
+  defineTool(server,
+    "elrc_courses",
+    {
+      title: "ELRC 课程录播列表",
+      description:
+        "搜索/列出 ELRC（虚拟教学社区·在线课堂）的课程录播：课程名、课程号、教师、上课时间地点。返回的 course_id + record_id 用于 elrc_course。",
+      inputSchema: z.object({
+        session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
+        keyword: z.string().optional().describe("课程名关键词"),
+        year: z.string().optional().describe("学年，如 2026-2027"),
+        semester: z.string().optional().describe("学期：秋季/春季/夏季"),
+        limit: z.number().int().min(1).max(50).default(20).describe("最多返回条数"),
+      }),
+      outputSchema: z.object({
+        count: z.number(),
+        courses: z.array(
+          z.object({
+            recordId: z.number(),
+            courseId: z.string(),
+            courseName: z.string(),
+            serialNumber: z.string().nullable(),
+            teachers: z.array(z.string()),
+          }),
+        ),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ session, keyword, year, semester, limit }) => {
+      try {
+        const auth = await platformAuth(session, "elrc");
+        const courses = await elrcListCourses(auth, { keyword, year, semester, size: limit });
+        if (courses.length === 0) return structured("没有匹配的课程录播。", { count: 0, courses: [] });
+        const items = courses.map((c) => {
+          let teachers: string[] = [];
+          try {
+            teachers = Object.values(JSON.parse(c.teachers ?? "{}") as Record<string, string>);
+          } catch {
+            teachers = [];
+          }
+          return {
+            recordId: c.id,
+            courseId: c.courseId,
+            courseName: c.courseName,
+            serialNumber: c.serialNumber ?? null,
+            teachers,
+          };
+        });
+        return structured(
+          [
+            `共 ${items.length} 门课程录播：`,
+            ...items.map((c) => `#${c.recordId} ${c.courseName}${c.serialNumber ? ` (${c.serialNumber})` : ""} | ${c.teachers.join("/") || "-"} | course_id=${c.courseId}`),
+          ].join("\n"),
+          { count: items.length, courses: items },
+        );
+      } catch (cause) {
+        return campusFailure("ELRC 课程列表查询失败", cause);
+      }
+    },
+  );
+
+  defineTool(server,
+    "elrc_course",
+    {
+      title: "ELRC 课程详情 + 回放切片",
+      description:
+        "按 course_id + record_id 读取课程详情（教师、院系、教室、周次安排），并列出某周各次课的机位切片（contentId 用于 elrc_recording / elrc_transcript / elrc_slides）。week 省略时选当前周（无数据则取第一个有录制的周）。",
+      inputSchema: z.object({
+        session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
+        course_id: z.string().min(1).describe("ELRC course_id（UUID）"),
+        record_id: z.number().int().positive().describe("ELRC record id（数字）"),
+        week: z.string().optional().describe("周次，如 \"9\""),
+        year: z.string().optional().describe("学年"),
+        semester: z.string().optional().describe("学期"),
+      }),
+      outputSchema: z.object({
+        courseName: z.string(),
+        teachers: z.array(z.string()),
+        weeks: z.array(
+          z.object({
+            week: z.string(),
+            sessions: z.array(
+              z.object({
+                weekDay: z.string(),
+                weekDate: z.string().nullable(),
+                section: z.string().nullable(),
+                clips: z.array(z.object({ contentId: z.string(), seat: z.string().nullable(), asr: z.string().nullable() })),
+              }),
+            ),
+          }),
+        ),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ session, course_id, record_id, week, year, semester }) => {
+      try {
+        const auth = await platformAuth(session, "elrc");
+        const info = await elrcCourseInfo(auth, course_id, record_id, year, semester);
+        const weeks = info.recordingVideoInfoShows ?? [];
+        const chosen =
+          weeks.find((w) => w.week === week) ??
+          weeks.find((w) => (w.recordInfoDetailList ?? []).some((s) => (s.videoInfoList ?? []).length > 0)) ??
+          weeks[0];
+
+        const row = (await elrcListCourses(auth, { year, semester, size: 50 })).find((c) => c.courseId === course_id);
+        const out: Array<{
+          week: string;
+          sessions: Array<{ weekDay: string; weekDate: string | null; section: string | null; clips: Array<{ contentId: string; seat: string | null; asr: string | null }> }>;
+        }> = [];
+
+        if (chosen && row?.courseNumber && row.serialNumber) {
+          const sessions = chosen.recordInfoDetailList ?? [];
+          for (const s of sessions) {
+            const videos = s.videoInfoList ?? [];
+            if (videos.length === 0) continue;
+            const scheduleIds = [...new Set(videos.map((v) => v.scheduleId).filter((x): x is string => Boolean(x)))];
+            let clips: Array<{ contentId: string; seat: string | null; asr: string | null }> = [];
+            try {
+              const found = await elrcListClips(auth, {
+                courseNumber: row.courseNumber,
+                serialNumber: row.serialNumber,
+                week: chosen.week,
+                weekDay: s.weekDay,
+                section: s.realSection ?? "",
+                scheduleIds,
+              });
+              clips = found.map((c) => ({ contentId: c.contentId_, seat: c.seat ?? null, asr: c.asr_status ?? null }));
+            } catch {
+              clips = [];
+            }
+            out.push({ week: chosen.week, sessions: [{ weekDay: s.weekDay, weekDate: s.weekDate ?? null, section: s.realSection ?? null, clips }] });
+          }
+        }
+
+        const lines = [
+          `${info.courseName}${row?.serialNumber ? ` (${row.serialNumber})` : ""} | ${(info.teacherList ?? []).map((t) => t.userName).join("/") || "-"}`,
+          `周次：${weeks.map((w) => w.week).join(",")}`,
+          chosen ? `第 ${chosen.week} 周：` : "无录播周次",
+        ];
+        for (const w of out) for (const s of w.sessions) {
+          lines.push(`  ${s.weekDate ?? ""} ${s.weekDay} ${s.section ?? ""}${s.clips.length ? ` → ${s.clips.map((c) => `${c.seat ?? "?"}:${c.contentId}`).join(" | ")}` : "（无切片）"}`);
+        }
+        return structured(lines.join("\n"), {
+          courseName: info.courseName,
+          teachers: (info.teacherList ?? []).map((t) => t.userName),
+          weeks: out,
+        });
+      } catch (cause) {
+        return campusFailure("ELRC 课程详情查询失败", cause);
+      }
+    },
+  );
+
+  defineTool(server,
+    "elrc_recording",
+    {
+      title: "ELRC 回放 AI 概览",
+      description:
+        "读取一次回放（contentId）的 AI 摘要、关键词、知识点分节（起止时间）与课件截图索引。用于先了解这堂课讲了什么，再决定查哪段。",
+      inputSchema: z.object({
+        session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
+        content_id: z.string().min(1).describe("回放切片 contentId"),
+      }),
+      outputSchema: z.object({
+        abstract: z.string().nullable(),
+        keywords: z.array(z.string()),
+        sections: z.array(z.object({ title: z.string(), start: z.number(), end: z.number() })),
+        slideCount: z.number(),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ session, content_id }) => {
+      try {
+        const summary = await elrcRecordingSummary(await platformAuth(session, "elrc"), content_id);
+        const lines = [
+          summary.abstract ? `摘要：${summary.abstract}` : "（无 AI 摘要）",
+          summary.keywords.length ? `关键词：${summary.keywords.join(" / ")}` : "",
+          summary.sections.length ? "知识点分节：" : "（无分节）",
+          ...summary.sections.map((s) => `  ${mmss(s.startSec)}-${mmss(s.endSec)} ${s.title}`),
+          `课件截图：${summary.slides.length} 张`,
+        ].filter(Boolean);
+        return structured(lines.join("\n"), {
+          abstract: summary.abstract,
+          keywords: summary.keywords,
+          sections: summary.sections.map((s) => ({ title: s.title, start: s.startSec, end: s.endSec })),
+          slideCount: summary.slides.length,
+        });
+      } catch (cause) {
+        return campusFailure("ELRC 回放概览查询失败", cause);
+      }
+    },
+  );
+
+  defineTool(server,
+    "elrc_transcript",
+    {
+      title: "ELRC 语音转写（按时间/关键词节选）",
+      description:
+        "获取回放的语音转写文本，可按时间段（start_sec/end_sec，单位秒）或关键词过滤，返回带 mm:ss 时间戳的行。用于精确定位「第几节什么时候讲了什么」，避免整段转写占满上下文。",
+      inputSchema: z.object({
+        session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
+        content_id: z.string().min(1).describe("回放切片 contentId"),
+        start_sec: z.number().min(0).optional().describe("起始秒（含）"),
+        end_sec: z.number().min(0).optional().describe("结束秒（含）"),
+        keyword: z.string().optional().describe("关键词过滤（在转写文本中匹配）"),
+        limit: z.number().int().min(1).max(200).default(60).describe("最多返回句数"),
+      }),
+      outputSchema: z.object({
+        totalSegments: z.number(),
+        returned: z.number(),
+        lines: z.array(z.object({ start: z.number(), end: z.number(), text: z.string() })),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ session, content_id, start_sec, end_sec, keyword, limit }) => {
+      try {
+        const all = await elrcTranscript(await platformAuth(session, "elrc"), content_id);
+        const kw = keyword?.trim().toLowerCase();
+        const filtered = all.filter((s) => {
+          if (start_sec !== undefined && s.end < start_sec) return false;
+          if (end_sec !== undefined && s.start > end_sec) return false;
+          if (kw && !s.text.toLowerCase().includes(kw) && !(s.textEn ?? "").toLowerCase().includes(kw)) return false;
+          return true;
+        });
+        const picked = filtered.slice(0, limit);
+        if (picked.length === 0) return structured("没有匹配的转写片段。", { totalSegments: all.length, returned: 0, lines: [] });
+        return structured(
+          [
+            `共 ${all.length} 句，匹配 ${filtered.length} 句（显示 ${picked.length}）：`,
+            ...picked.map((s) => `[${mmss(s.start)}-${mmss(s.end)}] ${s.text}`),
+          ].join("\n"),
+          { totalSegments: all.length, returned: picked.length, lines: picked.map((s) => ({ start: s.start, end: s.end, text: s.text })) },
+        );
+      } catch (cause) {
+        return campusFailure("ELRC 转写查询失败", cause);
+      }
+    },
+  );
+
+  defineTool(server,
+    "elrc_slides",
+    {
+      title: "ELRC 课件截图（时间定位）",
+      description: "列出回放的课件截图：时间点、OCR 文本、图片链接（10 分钟有效的代理链接，可直接打开）。用于把 slides 与讲解时间对齐。",
+      inputSchema: z.object({
+        session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
+        content_id: z.string().min(1).describe("回放切片 contentId"),
+        limit: z.number().int().min(1).max(100).default(40).describe("最多返回张数"),
+      }),
+      outputSchema: z.object({
+        count: z.number(),
+        slides: z.array(z.object({ start: z.number(), text: z.string(), url: z.string(), at: z.string() })),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ session, content_id, limit }, ctx) => {
+      try {
+        const auth = await platformAuth(session, "elrc");
+        const summary = await elrcRecordingSummary(auth, content_id);
+        const origin = ctx.http?.req?.url ?? process.env.PUBLIC_BASE_URL ?? "https://shanghaitech-mcp.vercel.app";
+        const slides = summary.slides.slice(0, limit).map((s) => ({
+          start: s.startSec,
+          text: s.text,
+          at: mmss(s.startSec),
+          url: s.image
+            ? downloadUrl(new URL(origin).origin, auth.jar ?? {}, s.image, `slide-${s.startSec}.png`, ELRC_BASE)
+            : "",
+        }));
+        if (slides.length === 0) return structured("该回放没有课件截图。", { count: 0, slides: [] });
+        return structured(
+          [`共 ${slides.length} 张课件截图：`, ...slides.map((s) => `[${s.at}] ${s.text.slice(0, 80)}${s.text.length > 80 ? "…" : ""}\n  ${s.url}`)].join("\n"),
+          { count: slides.length, slides },
+        );
+      } catch (cause) {
+        return campusFailure("ELRC 课件截图查询失败", cause);
       }
     },
   );

@@ -264,5 +264,6 @@ campus_link({ session, target: "ecourse" }) → { url, expires_in }
 | libspace | oauth2-code → bearer | CASTGC（换 OAuth code） | `access_token` + `/me` | `libspace_*` ✅（含写操作） |
 | eCourse | keycloak-broker | CASTGC（CAS broker） | `session=V2-…` + `KEYCLOAK_*` | `ecourse_*` ✅（课程/作业/在线测验/同学/课件/下载） |
 | Blackboard | sso-form | CASTGC + SSO 表单 | `session_id` / `s_session_id` | `elearning_*` ✅（课程/公告/作业/课件/代理下载） |
+| ELRC | cas | CASTGC | `S1_rman_sid` | `elrc_*` ✅（录播/切片/AI 概览/转写/课件截图） |
 | eCourse | keycloak-broker | CASTGC（浏览器） | 无服务端流程 | ⬜（深链 / `campus_link`） |
 | 图书馆 / 邮件 / OJ | 自有账号 | 非 IDS | — | 明确标 unsupported，不承诺 SSO |

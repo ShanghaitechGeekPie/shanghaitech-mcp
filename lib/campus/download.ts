@@ -1,4 +1,5 @@
 import { BB_BASE } from "./elearning";
+import { ELRC_BASE } from "./elrc";
 import type { CookieJar } from "./http";
 import { seal, unseal } from "./seal";
 
@@ -6,11 +7,18 @@ interface DownloadPayload {
   jar: CookieJar;
   path: string;
   name: string;
+  /** Which upstream host the path belongs to. */
+  base?: string;
 }
 
+const ALLOWED: Array<{ base: string; prefixes: string[] }> = [
+  { base: BB_BASE, prefixes: ["/bbcswebdav/"] },
+  { base: ELRC_BASE, prefixes: ["/bucket-"] },
+];
+
 /** Blackboard course files sit behind a session cookie; mint a short-lived proxy link. */
-export function downloadUrl(origin: string, jar: CookieJar, path: string, name: string): string {
-  const token = seal({ jar, path, name }, 10 * 60 * 1000);
+export function downloadUrl(origin: string, jar: CookieJar, path: string, name: string, base?: string): string {
+  const token = seal({ jar, path, name, base }, 10 * 60 * 1000);
   return `${origin.replace(/\/+$/, "")}/api/download?t=${encodeURIComponent(token)}`;
 }
 
@@ -24,9 +32,10 @@ export async function proxyDownload(request: Request): Promise<Response> {
   } catch (cause) {
     return new Response(`invalid token: ${(cause as Error).message}`, { status: 403 });
   }
-  if (!payload.path.startsWith("/bbcswebdav/")) return new Response("bad path", { status: 400 });
+  const route = ALLOWED.find((a) => a.base === (payload.base ?? BB_BASE) && a.prefixes.some((p) => payload.path.startsWith(p)));
+  if (!route) return new Response("bad path", { status: 400 });
 
-  const upstream = await fetch(`${BB_BASE}${payload.path}`, {
+  const upstream = await fetch(`${route.base}${payload.path}`, {
     headers: {
       "user-agent": "Mozilla/5.0",
       cookie: Object.entries(payload.jar ?? {})

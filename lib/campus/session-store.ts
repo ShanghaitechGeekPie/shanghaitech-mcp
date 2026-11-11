@@ -4,6 +4,7 @@ import { deriveEcourseSession } from "./ecourse";
 import { deriveEamsSession } from "./eams";
 import { deriveEgateSession } from "./egate";
 import { deriveBlackboardSession } from "./elearning";
+import { deriveElrcSession } from "./elrc";
 import { type AuthContext, type CookieJar } from "./http";
 import { libspaceSession } from "./libspace";
 import { seal, unseal } from "./seal";
@@ -30,7 +31,7 @@ import { CampusSessionExpired } from "./eams";
 export const ROOT_TTL_SEC = 12 * 60 * 60;
 export const DERIVED_TTL_SEC = 30 * 60;
 
-export type PlatformKey = "eams" | "egate" | "ecourse" | "libspace" | "elearning";
+export type PlatformKey = "eams" | "egate" | "ecourse" | "libspace" | "elearning" | "elrc";
 
 const DERIVERS: Record<PlatformKey, (root: CookieJar) => Promise<AuthContext>> = {
   eams: deriveEamsSession,
@@ -38,6 +39,7 @@ const DERIVERS: Record<PlatformKey, (root: CookieJar) => Promise<AuthContext>> =
   ecourse: deriveEcourseSession,
   libspace: libspaceSession,
   elearning: deriveBlackboardSession,
+  elrc: deriveElrcSession,
 };
 
 export interface RootSession {

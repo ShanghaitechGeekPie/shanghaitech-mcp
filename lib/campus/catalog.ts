@@ -27,13 +27,14 @@ export interface CatalogEntry {
   requiresAuth?: boolean;
 }
 
-export type PlatformId = "eams" | "ecourse" | "elearning" | "libspace" | "coursebench" | "egate" | "campus";
+export type PlatformId = "eams" | "ecourse" | "elearning" | "elrc" | "libspace" | "coursebench" | "egate" | "campus";
 
 export const PLATFORM_TITLES: Record<PlatformId, string> = {
   eams: "教务系统 EAMS",
   ecourse: "eCourse（TronClass）",
   libspace: "图书馆空间预约",
   elearning: "Blackboard（elearning）",
+  elrc: "ELRC 在线课堂",
   coursebench: "CourseBench 课程评价",
   egate: "服务大厅 eGate",
   campus: "校园其他服务",
@@ -326,6 +327,48 @@ export const CATALOG: CatalogEntry[] = [
     url: "https://elearning.shanghaitech.edu.cn:8443/",
     keywords: ["blackboard", "课程", "course", "elearning"],
     tool: "elearning_courses",
+    requiresAuth: true,
+  },
+
+  // ---------------------------------------------------------------- elrc
+  {
+    id: "elrc.recordings",
+    platform: "elrc",
+    title: "课程录播 / 回放",
+    description: "按学期查课程录播，进入某次课的机位切片",
+    url: "https://elrc.shanghaitech.edu.cn/learn/videoreview",
+    keywords: ["录播", "回放", "在线课堂", "视频", "讲课", "recording", "video", "elrc"],
+    tool: "elrc_courses",
+    requiresAuth: true,
+  },
+  {
+    id: "elrc.transcript",
+    platform: "elrc",
+    title: "回放语音转写与知识点定位",
+    description: "带时间戳的转写，可按时段/关键词定位讲了什么",
+    url: "https://elrc.shanghaitech.edu.cn/learn/videoreview",
+    keywords: ["转写", "字幕", "语音", "时间戳", "知识点", "复习", "transcript", "subtitle"],
+    tool: "elrc_transcript",
+    requiresAuth: true,
+  },
+  {
+    id: "elrc.summary",
+    platform: "elrc",
+    title: "回放 AI 摘要与分节",
+    description: "AI 摘要、关键词、知识点分节（起止时间）",
+    url: "https://elrc.shanghaitech.edu.cn/learn/videoreview",
+    keywords: ["ai 总结", "摘要", "分节", "知识点", "summary", "chapter"],
+    tool: "elrc_recording",
+    requiresAuth: true,
+  },
+  {
+    id: "elrc.slides",
+    platform: "elrc",
+    title: "课件截图（slides）",
+    description: "按时间点对应的课件截图与 OCR 文本",
+    url: "https://elrc.shanghaitech.edu.cn/learn/videoreview",
+    keywords: ["课件", "ppt", "slides", "截图", "板书"],
+    tool: "elrc_slides",
     requiresAuth: true,
   },
 
