@@ -8,6 +8,7 @@ import {
   searchCourses,
   type CourseSummary,
 } from "@/lib/campus/coursebench";
+import { CATALOG, PLATFORM_TITLES, searchCatalog, type PlatformId } from "@/lib/campus/catalog";
 import { CampusSessionExpired, deriveEamsSession, eamsExams, eamsProfile, eamsSemesters } from "@/lib/campus/eams";
 import {
   EcourseError,
@@ -84,6 +85,16 @@ async function platformAuth<T extends object>(
 
 async function ecourseAuth(session: string) {
   return platformAuth(session, deriveEcourseSession);
+}
+
+function renderCatalogHits(hits: ReturnType<typeof searchCatalog>): string {
+  return hits
+    .map(({ entry }) => {
+      const auth = entry.requiresAuth ? "（需登录）" : "";
+      const tool = entry.tool ? `（已封装工具：${entry.tool}）` : "";
+      return `[${PLATFORM_TITLES[entry.platform]}] ${entry.title}${auth} — ${entry.description}${tool}\n  ${entry.url}`;
+    })
+    .join("\n");
 }
 
 function formatDeadline(iso: string | null | undefined): string {
@@ -1333,6 +1344,96 @@ export function registerCampusTools(server: McpServer): void {
       } catch (cause) {
         return campusFailure("ecourse 课件下载失败", cause);
       }
+    },
+  );
+
+  // ---------------------------------------------------------------- catalog
+
+  server.registerTool(
+    "campus_find",
+    {
+      title: "校园功能查找（统一搜索）",
+      description:
+        "按自然语言查找校园功能入口：课表、成绩、排名、考试、选课、作业、课件、座位、图书馆、邮箱、体育馆…… 返回平台、功能名、入口链接，以及已封装好的 MCP 工具名（有则可直接调用，无需打开网页）。同一诉求会跨平台返回多条（如「考试」同时给出教务排考与 eCourse 在线测验）。不传 query 则列出全部入口，可用 platform 过滤。",
+      inputSchema: z.object({
+        query: z.string().min(1).optional().describe("想做什么，如「查课表」「成绩排名」「图书馆座位」「作业 DDL」"),
+        platform: z
+          .enum(["eams", "ecourse", "libspace", "coursebench", "egate", "campus"])
+          .optional()
+          .describe("只在该平台内查找"),
+        limit: z.number().int().min(1).max(30).default(10).describe("最多返回条数"),
+      }),
+      outputSchema: z.object({
+        count: z.number(),
+        hits: z.array(
+          z.object({
+            platform: z.string(),
+            title: z.string(),
+            description: z.string(),
+            url: z.string(),
+            tool: z.string().nullable(),
+            requiresAuth: z.boolean(),
+          }),
+        ),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ query, platform, limit }) => {
+      const hits = searchCatalog(query ?? "", platform as PlatformId | undefined, limit);
+      if (hits.length === 0) {
+        return text(
+          query
+            ? `没找到与「${query}」匹配的校园功能入口。可以试试更宽的说法，例如「成绩」「课表」「图书馆」。`
+            : "目录为空。",
+        );
+      }
+      const head = query ? `与「${query}」相关的入口（${hits.length} 条）：` : `共 ${hits.length} 条入口：`;
+      return structured([head, renderCatalogHits(hits)].join("\n"), {
+        count: hits.length,
+        hits: hits.map(({ entry }) => ({
+          platform: entry.platform,
+          title: entry.title,
+          description: entry.description,
+          url: entry.url,
+          tool: entry.tool ?? null,
+          requiresAuth: entry.requiresAuth === true,
+        })),
+      });
+    },
+  );
+
+  server.registerTool(
+    "eams_menu",
+    {
+      title: "EAMS 功能菜单",
+      description:
+        "列出教务系统（EAMS）的学生端功能入口及链接：学籍、成绩、排名/成绩单、培养方案、课表、选课、考试、教材、教室等。多数功能只给入口，学生自行打开网页操作；带「已封装」标记的可直接用对应 MCP 工具。可选 query 过滤。",
+      inputSchema: z.object({
+        query: z.string().min(1).optional().describe("按关键词过滤，如「成绩」「课表」「证明」"),
+        limit: z.number().int().min(1).max(40).default(40).describe("最多返回条数"),
+      }),
+      outputSchema: z.object({
+        count: z.number(),
+        entries: z.array(
+          z.object({ title: z.string(), description: z.string(), url: z.string(), tool: z.string().nullable() }),
+        ),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ query, limit }) => {
+      const hits = query
+        ? searchCatalog(query, "eams", limit)
+        : CATALOG.filter((e) => e.platform === "eams").slice(0, limit).map((entry) => ({ entry, score: 0 }));
+      const entries = hits.map(({ entry }) => ({
+        title: entry.title,
+        description: entry.description,
+        url: entry.url,
+        tool: entry.tool ?? null,
+      }));
+      return structured(
+        [query ? `EAMS 中与「${query}」相关的入口（${entries.length} 条）：` : `EAMS 功能入口（${entries.length} 条）：`, renderCatalogHits(hits)].join("\n"),
+        { count: entries.length, entries },
+      );
     },
   );
 }

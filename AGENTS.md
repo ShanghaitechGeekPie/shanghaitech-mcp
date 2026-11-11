@@ -61,6 +61,7 @@ Tool-surface rules (naming, budgets, schemas, outputs, annotations, error classe
 | `lib/campus/seal.ts` | AES-256-GCM sealing of session handles (`seal`/`unseal`, 12 h TTL enforced on open). |
 | `lib/campus/http.ts` | Shared cookie jar + `follow()` (manual redirects, per-hop `Set-Cookie`). |
 | `lib/campus/eams.ts`, `egate.ts` | Platform adapters ported from `/home/zambar/repos/shanghaitech-cpdaily-auth` (TechPie backend). |
+| `lib/campus/catalog.ts` | Campus capability catalog: entry points (title/description/url/keywords/tool). `searchCatalog()` is local keyword+bigram scoring — **no network, no LLM**. EAMS URLs were scraped from the live menu `home!childmenus.action?menu.id=165/176`; every entry must be verified, never guessed. |
 | `lib/campus/ecourse.ts` | TronClass. SPA + Keycloak CAS broker: `ecourse/login → ecourse:8600/auth/realms/shanghaitech/protocol/cas → IDS CAS`; session is `session=V2-…` plus `KEYCLOAK_*` cookies. API: `/api/my-courses`, `/api/courses/{id}/activities`, `/api/courses/{id}/exams`, `/api/course/{id}/enrollments`, `/api/uploads/{id}/url` (signed, Range-capable). |
 | `lib/campus/libspace.ts` | Library-space booking. Different credential shape: IDS **OAuth2 code** → `access_token`, sent as header `token:` (not `Authorization: Bearer`). Derived per call; no cookie session. |
 | `scripts/smoke-mcp.sh` | initialize + tools/list against a running endpoint. |
@@ -93,6 +94,7 @@ curl -s -X POST http://localhost:3000/api/mcp \
 - **TypeScript strict**, `noUncheckedIndexedAccess`. No `any`; type upstream payloads with interfaces in the platform module. Path alias `@/*` → repo root.
 - **Naming**: files `kebab-case.ts`; exported functions verb-first (`searchCourses`, `getCourseComments`, `validateServiceTicket`); tool names `<platform>_<verb>_<noun>` in `snake_case` (`coursebench_search_courses`).
 - **Tool contract**: `registerTool(name, { title, description, inputSchema: z.object({...}), annotations }, handler)`. Inputs are Zod objects (v2 SDK Standard Schema), always with `.describe()` in Chinese. `annotations.readOnlyHint: true` for read-only tools. Return `{ content: [{ type: "text", text }] }`.
+- **Not every feature becomes a tool.** Data-bearing features are wrapped; everything else is a catalog entry surfaced by `campus_find` / `eams_menu` (title + link + whether an MCP tool exists). Prefer "tell the student where to click" over scraping a page nobody asked to automate.
 - **Tool surface is governed** by `docs/MCP-TOOL-CONVENTIONS.md`: names `<platform>_<resource>_<verb>` (2–5 segments), ≤25 tools total / ≤6 per platform, every input field described, writes require a `confirm` gate plus explicit `destructiveHint`, failures return `isError` with the next action, never credentials. Verify with `pnpm check:surface` (needs a running server).
 - **User-facing strings are Chinese** (tool descriptions, error messages, page copy). Code comments and identifiers are English.
 - **Async/errors**: `async` handlers, `AbortSignal.timeout(...)` on every outbound fetch, explicit `res.ok` checks, typed error classes per platform. No silent `catch {}`; convert to a user-visible result or rethrow with context.
