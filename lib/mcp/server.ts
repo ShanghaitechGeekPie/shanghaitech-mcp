@@ -42,6 +42,7 @@ import {
   parseSemesterName,
   recordingSummary as elrcRecordingSummary,
   searchCourses as elrcSearchCourses,
+  searchOther as elrcSearchOther,
   transcript as elrcTranscript,
 } from "@/lib/campus/elrc";
 import { egateStudent } from "@/lib/campus/egate";
@@ -1654,7 +1655,7 @@ export function registerCampusTools(server: McpServer): void {
           );
         }
 
-        const result = await elrcSearchCourses(auth, query ?? "", page);
+        const result = await elrcSearchCourses(auth, query ?? "", page, Math.min(limit, 30));
         const courses = result.courses.slice(0, limit).map((c) => ({
           courseId: c.courseId,
           name: c.name,
@@ -1962,4 +1963,40 @@ export function registerCampusTools(server: McpServer): void {
       }
     },
   );
+
+  defineTool(server,
+    "elrc_search",
+    {
+      title: "ELRC 全局搜索（资源/知识点/直播/教师）",
+      description:
+        "ELRC 课程中心之外的检索：教学资源（EYun/Blackboard/Mooc 的课件与资料）、知识点、直播/回放条目、教师。课程本身请用 elrc_courses。",
+      inputSchema: z.object({
+        session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
+        scope: z.enum(["resources", "knowledge", "live", "teachers"]).describe("检索范围"),
+        query: z.string().min(1).describe("关键词"),
+        page: z.number().int().min(1).max(20).default(1).describe("页码"),
+        size: z.number().int().min(1).max(50).default(10).describe("每页条数"),
+        source: z.enum(["EYun", "Blackboard", "Mooc"]).default("EYun").describe("resources 范围的数据源"),
+      }),
+      outputSchema: z.object({
+        scope: z.string(),
+        total: z.number().nullable(),
+        items: z.array(z.object({ title: z.string(), meta: z.string(), ref: z.string() })),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ session, scope, query, page, size, source }) => {
+      try {
+        const res = await elrcSearchOther(await platformAuth(session, "elrc"), scope, query, page, size, source);
+        if (res.items.length === 0) return structured("没有匹配结果。", { scope, total: res.total, items: [] });
+        return structured(
+          [`${scope}：「${query}」共 ${res.total ?? res.items.length} 条（显示 ${res.items.length}）：`, ...res.items.map((i) => `- ${i.title}${i.meta ? ` | ${i.meta}` : ""}${i.ref ? ` | ${i.ref}` : ""}`)].join("\n"),
+          { scope, total: res.total, items: res.items },
+        );
+      } catch (cause) {
+        return campusFailure("ELRC 搜索失败", cause);
+      }
+    },
+  );
+
 }

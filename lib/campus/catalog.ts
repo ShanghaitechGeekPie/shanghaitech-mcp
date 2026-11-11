@@ -352,6 +352,16 @@ export const CATALOG: CatalogEntry[] = [
     requiresAuth: true,
   },
   {
+    id: "elrc.search",
+    platform: "elrc",
+    title: "全局搜索（资源/知识点/直播/教师）",
+    description: "教学资源、知识点、直播回放条目、教师检索",
+    url: "https://elrc.shanghaitech.edu.cn/learn/global/search",
+    keywords: ["搜索", "资源", "文献", "知识点", "直播", "教师", "search", "resource"],
+    tool: "elrc_search",
+    requiresAuth: true,
+  },
+  {
     id: "elrc.transcript",
     platform: "elrc",
     title: "回放语音转写与知识点定位",

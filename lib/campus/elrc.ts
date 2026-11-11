@@ -674,25 +674,36 @@ async function chapters(auth: AuthContext, course: MyCourse): Promise<ElrcCourse
 
 // ---------------------------------------------------------------- course search (all semesters)
 
+/**
+ * Course-center search. Backed by the dedicated API (no HTML scraping):
+ *   GET /learn/shanghai/tech/get/course?keyword=&page=&size=&sort=semester
+ * Covers every semester (~11k courses). Each row carries contentId_,
+ * serialNumber, courseNumber, teacher_names and semester_show_name.
+ */
 const SearchRow = z
   .object({
     contentId_: z.string(),
     name_: z.string(),
-    classTeaching: z.string().nullable().optional(),
+    serialNumber: z.string().nullable().optional(),
+    courseNumber: z.string().nullable().optional(),
     teacher_names: z.array(z.string()).nullable().optional(),
-    collegeName: z.array(z.string()).nullable().optional(),
     semester_show_name: z.string().nullable().optional(),
-    semester_list: z.array(z.string()).nullable().optional(),
     course_semester_id: z.union([z.string(), z.number()]).nullable().optional(),
   })
   .loose();
 
-const CourseData = z.object({
-  page: z.number(),
-  size: z.number(),
-  total: z.number(),
-  results: z.array(SearchRow).nullable().optional(),
-});
+const CourseSearch = z
+  .object({
+    data: z
+      .object({
+        page: z.number(),
+        size: z.number(),
+        total: z.number(),
+        results: z.array(SearchRow).nullable().optional(),
+      })
+      .loose(),
+  })
+  .loose();
 
 export interface CourseSearchResult {
   total: number;
@@ -701,33 +712,19 @@ export interface CourseSearchResult {
   courses: MyCourse[];
 }
 
-function courseNumberFrom(serial: string | null | undefined): string | null {
-  if (!serial) return null;
-  return serial.trim().replace(/\s+/g, "").split(".")[0] ?? null;
+/** "2026-2027-1" → "2026-2027学年秋季" (the form the course list expects). */
+export function semesterFromShow(show: string | null | undefined): string | null {
+  if (!show) return null;
+  const m = show.match(/(\d{4}-\d{4})-(\d)/);
+  if (!m) return show;
+  const term = m[2] === "2" ? "春季" : m[2] === "3" ? "夏季" : "秋季";
+  return `${m[1]}学年${term}`;
 }
 
-/**
- * Full course-center search (`/learn/search?keyword=`), which spans every
- * semester. The page is server-rendered and embeds the payload as
- * `var courseData = {...};`, so parse the HTML instead of guessing an API.
- */
-export async function searchCourses(auth: AuthContext, keyword: string, page = 1): Promise<CourseSearchResult> {
-  const query = new URLSearchParams({ keyword, page: String(page) });
-  const res = await follow(`${ELRC_BASE}/learn/search?${query}`, authOptions(auth, { maxHops: 3, timeoutMs: 25_000 }));
-  if (res.url.includes("ids.shanghaitech.edu.cn")) throw new CampusSessionExpired("ELRC 搜索页被重定向到 IDS，请重新 ids_login");
-  // The payload is embedded as an escaped JSON object:
-  //   var courseData = {\"page\":1,...};
-  const marker = res.text.indexOf("var courseData = ");
-  if (marker < 0) throw new ElrcError(`ELRC 搜索页未包含结果数据（${res.text.length} 字节）`, "parse_drift");
-  const lineEnd = res.text.indexOf("\n", marker);
-  const raw = res.text
-    .slice(marker + "var courseData = ".length, lineEnd > 0 ? lineEnd : undefined)
-    .trim()
-    .replace(/;$/, "")
-    .replace(/\\"/g, '"');
-  const parsed = CourseData.safeParse(JSON.parse(raw));
-  if (!parsed.success) throw new ElrcError(`ELRC 搜索结果结构异常：${parsed.error.message.slice(0, 140)}`, "parse_drift");
-  const data = parsed.data;
+export async function searchCourses(auth: AuthContext, keyword: string, page = 1, size = 15): Promise<CourseSearchResult> {
+  const query = new URLSearchParams({ keyword, page: String(page), size: String(size), sort: "semester" });
+  const res = await getJson(auth, `/learn/shanghai/tech/get/course?${query}`, CourseSearch);
+  const data = res.data;
   return {
     total: data.total,
     page: data.page,
@@ -735,13 +732,174 @@ export async function searchCourses(auth: AuthContext, keyword: string, page = 1
     courses: (data.results ?? []).map((r) => ({
       courseId: r.contentId_,
       name: r.name_,
-      serialNumber: r.classTeaching?.trim() || null,
-      courseNumber: courseNumberFrom(r.classTeaching),
+      serialNumber: r.serialNumber?.trim() || null,
+      courseNumber: r.courseNumber?.trim() || null,
       teachers: r.teacher_names ?? [],
       classTime: null,
-      colleges: r.collegeName ?? [],
+      colleges: [],
       courseSemesterId: r.course_semester_id != null ? String(r.course_semester_id) : null,
-      semester: r.semester_list?.[0] ?? r.semester_show_name ?? null,
+      semester: semesterFromShow(r.semester_show_name) ?? null,
+    })),
+  };
+}
+
+// ---------------------------------------------------------------- other search scopes
+
+export type SearchScope = "resources" | "knowledge" | "live" | "teachers";
+
+export interface SearchItem {
+  title: string;
+  meta: string;
+  ref: string;
+}
+
+const ResourceSearch = z
+  .object({
+    data: z
+      .object({
+        extendMessage: z
+          .object({
+            recordTotal: z.number().nullable().optional(),
+            data: z
+              .array(
+                z
+                  .object({
+                    contentId: z.string().nullable().optional(),
+                    name: z.string().nullable().optional(),
+                    courseCode: z.string().nullable().optional(),
+                    courseName: z.string().nullable().optional(),
+                    courseTeachers: z.string().nullable().optional(),
+                    resourceFormat: z.string().nullable().optional(),
+                  })
+                  .loose(),
+              )
+              .nullable()
+              .optional(),
+          })
+          .loose()
+          .nullable()
+          .optional(),
+      })
+      .loose(),
+  })
+  .loose();
+
+const KnowledgeSearch = z
+  .object({
+    data: z
+      .object({
+        total: z.number().nullable().optional(),
+        results: z
+          .array(
+            z
+              .object({
+                name_: z.string().nullable().optional(),
+                course_id: z.string().nullable().optional(),
+                teacherCodes: z.array(z.string()).nullable().optional(),
+                courseType: z.number().nullable().optional(),
+              })
+              .loose(),
+          )
+          .nullable()
+          .optional(),
+      })
+      .loose(),
+  })
+  .loose();
+
+const LiveSearch = z
+  .object({
+    data: z
+      .array(
+        z
+          .object({
+            id: z.string().nullable().optional(),
+            liveName: z.string().nullable().optional(),
+            liveSpeaker: z.string().nullable().optional(),
+            scheduleStatus: z.number().nullable().optional(),
+          })
+          .loose(),
+      )
+      .nullable()
+      .optional(),
+  })
+  .loose();
+
+const TeacherSearch = z
+  .object({
+    data: z
+      .object({
+        total: z.number().nullable().optional(),
+        results: z
+          .array(
+            z
+              .object({
+                nickName: z.string().nullable().optional(),
+                userCode: z.string().nullable().optional(),
+                college: z.string().nullable().optional(),
+              })
+              .loose(),
+          )
+          .nullable()
+          .optional(),
+      })
+      .loose(),
+  })
+  .loose();
+
+export async function searchOther(
+  auth: AuthContext,
+  scope: SearchScope,
+  query: string,
+  page = 1,
+  size = 10,
+  source: "EYun" | "Blackboard" | "Mooc" = "EYun",
+): Promise<{ total: number | null; items: SearchItem[] }> {
+  if (scope === "resources") {
+    const path = `/rman/v1/resourcecentre/searchteachingresource?page=${page}&size=${size}&keyword=${encodeURIComponent(query)}&publishYear=-1&isDefault=false&source=${source}`;
+    const res = await getJson(auth, path, ResourceSearch);
+    const em = res.data.extendMessage;
+    return {
+      total: em?.recordTotal ?? null,
+      items: (em?.data ?? []).map((r) => ({
+        title: r.name ?? "",
+        meta: [r.courseCode, r.courseName, r.courseTeachers, r.resourceFormat].filter(Boolean).join(" | "),
+        ref: r.contentId ?? "",
+      })),
+    };
+  }
+  if (scope === "knowledge") {
+    const path = `/learn/v1/search/history/knowledge/point?name=${encodeURIComponent(query)}&wholeMatch=false&page=${page}&size=${size}`;
+    const res = await getJson(auth, path, KnowledgeSearch);
+    return {
+      total: res.data.total ?? null,
+      items: (res.data.results ?? []).map((r) => ({
+        title: r.name_ ?? "",
+        meta: [r.teacherCodes?.join("/"), r.course_id ? `course=${r.course_id}` : ""].filter(Boolean).join(" | "),
+        ref: r.course_id ?? "",
+      })),
+    };
+  }
+  if (scope === "live") {
+    const path = `/learn/v1/search/history/search/live?name=${encodeURIComponent(query)}&page=${page}&size=${size}`;
+    const res = await getJson(auth, path, LiveSearch);
+    return {
+      total: (res.data ?? []).length,
+      items: (res.data ?? []).map((r) => ({
+        title: r.liveName ?? "",
+        meta: [r.liveSpeaker, r.scheduleStatus != null ? `状态 ${r.scheduleStatus}` : ""].filter(Boolean).join(" | "),
+        ref: r.id ?? "",
+      })),
+    };
+  }
+  const path = `/learn/v1/search/history/search/teacher?name=${encodeURIComponent(query)}&page=${page}&size=${size}&wholeMatch=false`;
+  const res = await getJson(auth, path, TeacherSearch);
+  return {
+    total: res.data.total ?? null,
+    items: (res.data.results ?? []).map((r) => ({
+      title: r.nickName ?? "",
+      meta: r.college ?? "",
+      ref: r.userCode ?? "",
     })),
   };
 }
