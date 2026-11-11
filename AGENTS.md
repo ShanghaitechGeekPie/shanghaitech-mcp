@@ -36,9 +36,12 @@ Key properties to preserve:
 - **Platform session pattern**: never hardcode a CAS `service=`. Request the platform's own entry URL with the CASTGC in the jar and let the site 302 to IDS itself; follow every hop with `follow()` from `lib/campus/http.ts` so each `Set-Cookie` is captured. Success = final URL is not on `ids.shanghaitech.edu.cn` and the body lacks `统一身份认证`.
 - **Every platform needs its priming call** before data endpoints: EAMS `/eams/home.action`, eGate `/xsfw/sys/funauthapp/api/getAppConfig/xshdapp-4770201649822494.do?v=<ts>`. Without it the first data call returns an uninitialized shell.
 - **Consumed tickets are single-use**: never retry a hop that carried `ticket=ST-…`; re-derive the whole platform session instead.
+- **Page language is account state, not a request header.** EAMS renders in whatever language the account picked on the IDS login page (`org.springframework.web.servlet.i18n.CookieLocaleResolver.LOCALE` written by the page's own JS, then stored IDS-side). Replaying that cookie against `eams.shanghaitech.edu.cn` does **not** switch the page (verified: `zh_CN` and `en` both returned Chinese). Therefore every HTML parser must accept both labels (`姓名|Name`, `Student No`) and fail loudly — never return both-fields-null.
 - **Failures are data.** Upstream errors are converted into MCP tool results with `isError: true` and a readable Chinese message; they never throw out of the handler.
 - **Auth is credential login, not OAuth.** `ids_login` takes IDS username + password, performs the real CAS form login (`GET login page → checkNeedCaptcha → POST login → CASTGC`), and returns an opaque `v1.<iv>.<tag>.<ct>` handle sealed with AES-256-GCM (`MCP_ENC_KEY`). Passwords are used in-request and never persisted. Campus state travels in the handle — no DB, no session store, no memory.
 - **Captcha is part of the contract.** IDS escalates captcha by egress IP. `ids_login` returns an image + encrypted `continuation` instead of retrying; never auto-retry a failed login.
+
+Full layering, platform/sub-app/tool model and migration plan: `docs/ARCHITECTURE.md`. Keep code aligned with it (one module per platform, tools hold schemas, platforms hold parsing).
 
 ## Key Directories
 

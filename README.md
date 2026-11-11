@@ -127,6 +127,10 @@ claude.ai / ChatGPT 这类托管客户端不支持自定义 header，需要等 O
 3. **托管客户端**：claude.ai / ChatGPT 不支持自定义 header，要么走 OAuth（本次明确不做），要么只支持 IDE/CLI 客户端。
 4. **测试**：`encryptPassword`、错误码分类、`seal/unseal` 上 `vitest`；登录链只用无效学号做冒烟，不用真实凭据跑 CI。
 
+## 架构
+
+分层、四级模型（协议族/平台/子应用/工具）、工具命名与预算、会话与错误分类：见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+
 ## 已知边界
 
 - 邮件（Coremail，强制二次验证）、图书馆（Primo VE，自有 apikey）、OJ（Hydro）、VPN（Sangfor aTrust）不走 IDS SSO，需要单独适配。
