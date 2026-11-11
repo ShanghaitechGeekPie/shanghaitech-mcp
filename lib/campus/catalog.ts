@@ -27,12 +27,13 @@ export interface CatalogEntry {
   requiresAuth?: boolean;
 }
 
-export type PlatformId = "eams" | "ecourse" | "libspace" | "coursebench" | "egate" | "campus";
+export type PlatformId = "eams" | "ecourse" | "elearning" | "libspace" | "coursebench" | "egate" | "campus";
 
 export const PLATFORM_TITLES: Record<PlatformId, string> = {
   eams: "教务系统 EAMS",
   ecourse: "eCourse（TronClass）",
   libspace: "图书馆空间预约",
+  elearning: "Blackboard（elearning）",
   coursebench: "CourseBench 课程评价",
   egate: "服务大厅 eGate",
   campus: "校园其他服务",
@@ -283,6 +284,48 @@ export const CATALOG: CatalogEntry[] = [
     url: "https://ecourse.shanghaitech.edu.cn/",
     keywords: ["课件", "ppt", "讲义", "资料", "下载", "material", "slides"],
     tool: "ecourse_materials",
+    requiresAuth: true,
+  },
+
+  // ---------------------------------------------------------------- elearning
+  {
+    id: "elearning.announcements",
+    platform: "elearning",
+    title: "通知公告",
+    description: "课程通知与机构公告（Blackboard）",
+    url: "https://elearning.shanghaitech.edu.cn:8443/",
+    keywords: ["通知", "公告", "announcement", "notice", "消息"],
+    tool: "elearning_announcements",
+    requiresAuth: true,
+  },
+  {
+    id: "elearning.assignments",
+    platform: "elearning",
+    title: "作业与截止日期",
+    description: "Blackboard 课程作业及 DDL、提交入口",
+    url: "https://elearning.shanghaitech.edu.cn:8443/",
+    keywords: ["作业", "ddl", "deadline", "assignment", "提交", "截止"],
+    tool: "elearning_assignments",
+    requiresAuth: true,
+  },
+  {
+    id: "elearning.files",
+    platform: "elearning",
+    title: "课件与资料",
+    description: "课程内容目录、课件下载",
+    url: "https://elearning.shanghaitech.edu.cn:8443/",
+    keywords: ["课件", "资料", "下载", "ppt", "pdf", "courseware", "file"],
+    tool: "elearning_contents",
+    requiresAuth: true,
+  },
+  {
+    id: "elearning.courses",
+    platform: "elearning",
+    title: "我的 Blackboard 课程",
+    description: "已注册课程列表与课程 id",
+    url: "https://elearning.shanghaitech.edu.cn:8443/",
+    keywords: ["blackboard", "课程", "course", "elearning"],
+    tool: "elearning_courses",
     requiresAuth: true,
   },
 

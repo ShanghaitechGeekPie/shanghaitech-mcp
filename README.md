@@ -14,6 +14,7 @@
 | EAMS 身份 / 学期 / 考试排考 | ✅ 工具 `eams_profile`、`eams_semesters`、`eams_exams` |
 | eGate 学生信息 | ✅ 工具 `egate_student` |
 | 图书馆空间预约（libspace） | ✅ 6 个工具：账号 / 查房间 / 查时段 / 我的预约 / 创建 / 签到·取消·提前结束·延长 |
+| Blackboard（elearning） | ✅ 5 个工具：课程 / 通知公告 / 作业与截止 / 课件目录 / 课件下载（代理链接） |
 | 校园功能目录 | ✅ `campus_find`（工具 + 网页入口统一检索） |
 | eCourse（TronClass） | ✅ 6 个工具：课程 / 作业与截止 / 在线测验 / 同班同学 / 课件 / 课件下载 |
 | 静态 bearer token 兜底（IDE/CI） | ✅ `MCP_AUTH_TOKEN` |

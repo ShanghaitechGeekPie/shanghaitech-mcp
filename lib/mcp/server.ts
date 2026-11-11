@@ -22,6 +22,15 @@ import {
   uploadInfo,
   uploadUrl,
 } from "@/lib/campus/ecourse";
+import {
+  ElearningError,
+  bbAnnouncements,
+  bbAssignments,
+  bbContents,
+  bbCourses,
+  deriveBlackboardSession,
+} from "@/lib/campus/elearning";
+import { downloadUrl } from "@/lib/campus/download";
 import { deriveEgateSession, egateStudent } from "@/lib/campus/egate";
 import {
   LibspaceError,
@@ -99,7 +108,10 @@ function campusFailure(prefix: string, cause: unknown) {
   const err = cause instanceof Error ? cause : undefined;
   const nested = err?.cause instanceof Error ? ` (${err.cause.message})` : "";
   const message =
-    cause instanceof CampusSessionExpired || cause instanceof LibspaceError || cause instanceof EcourseError
+    cause instanceof CampusSessionExpired ||
+    cause instanceof LibspaceError ||
+    cause instanceof EcourseError ||
+    cause instanceof ElearningError
       ? `${cause.message}${nested}`
       : `${err?.message ?? String(cause)}${nested}`;
   return { content: [{ type: "text" as const, text: `${prefix}：${message}` }], isError: true };
@@ -162,7 +174,7 @@ export function registerCampusTools(server: McpServer): void {
     async ({ query, institute, min_score, limit }) => {
       try {
         const courses = await searchCourses({ query, institute, minScore: min_score, limit });
-        if (courses.length === 0) return text("没有匹配的课程。");
+        if (courses.length === 0) return structured("没有匹配的课程。", { count: 0, courses: [] });
         return structured([`找到 ${courses.length} 门课程：`, ...courses.map(courseLine)].join("\n"), {
           count: courses.length,
           courses: courses.map((c) => ({
@@ -512,7 +524,7 @@ export function registerCampusTools(server: McpServer): void {
         const semesterId = semester_id ?? (await eamsSemesters(auth)).defaultSemester;
         if (!semesterId) return { content: [{ type: "text" as const, text: "EAMS 未返回默认学期，请显式传 semester_id。" }], isError: true };
         const { batch, exams } = await eamsExams(auth, semesterId, batch_id);
-        if (exams.length === 0) return text(`${batch.name}：暂无排考记录。`);
+        if (exams.length === 0) return structured(`${batch.name}：暂无排考记录。`, { semesterId, batch: { id: batch.id, name: batch.name }, count: 0, exams: [] });
         const lines = exams.map(
           (e) =>
             `${e.courseCode} ${e.courseName} | ${e.examType} | ${e.examDate} ${e.examTimeRange} | ${e.examPlace} | ${e.examStatus}${
@@ -674,7 +686,7 @@ export function registerCampusTools(server: McpServer): void {
         const rooms = (await listRooms(auth, { date, type, pageSize: 100 })).filter(
           (r) => floor === undefined || r.floorNo === floor,
         );
-        if (rooms.length === 0) return text(`${date} 没有符合条件的房间。`);
+        if (rooms.length === 0) return structured(`${date} 没有符合条件的房间。`, { date, type: type ?? null, config: null, roomCount: 0, rooms: [] });
 
         const config = type ? await spaceConfig(auth, type).catch(() => null) : null;
         const header = config
@@ -872,7 +884,7 @@ export function registerCampusTools(server: McpServer): void {
           dateStart: date_start,
           dateEnd: date_end,
         });
-        if (page.list.length === 0) return text(`${tab === "current" ? "当前没有进行中的预约。" : "没有历史预约。"}`);
+        if (page.list.length === 0) return structured(`${tab === "current" ? "当前没有进行中的预约。" : "没有历史预约。"}`, { mode: "list", total: 0, items: [] });
         const lines = page.list.map(
           (r) =>
             `#${r.reservationId} ${r.reserveDate} ${r.startTime}-${r.endTime} ${r.spaceName} | ${
@@ -1350,7 +1362,7 @@ export function registerCampusTools(server: McpServer): void {
       inputSchema: z.object({
         query: z.string().min(1).optional().describe("关键词，多个用空格分隔，如「成绩 排名」「图书馆 座位 预约」"),
         platform: z
-          .enum(["eams", "ecourse", "libspace", "coursebench", "egate", "campus"])
+          .enum(["eams", "ecourse", "elearning", "libspace", "coursebench", "egate", "campus"])
           .optional()
           .describe("只在该平台内查找"),
         kind: z.enum(["tool", "entry"]).optional().describe("只要工具或只要网页入口"),
@@ -1377,10 +1389,11 @@ export function registerCampusTools(server: McpServer): void {
     async ({ query, platform, kind, limit }) => {
       const hits = findCampus({ query, platform: platform as PlatformId | undefined, kind, limit });
       if (hits.length === 0) {
-        return text(
+        return structured(
           query
             ? `没找到与「${query}」匹配的工具或入口。可以拆成更短的关键词，例如「成绩」「课表」「图书馆」。`
             : "目录为空。",
+          { count: 0, tools: [], entries: [] },
         );
       }
       const tools = hits.filter((h) => h.kind === "tool");
@@ -1417,6 +1430,174 @@ export function registerCampusTools(server: McpServer): void {
           requiresAuth: e.requiresAuth === true,
         })),
       });
+    },
+  );
+
+  // ---------------------------------------------------------------- elearning
+
+  defineTool(server,
+    "elearning_courses",
+    {
+      title: "Blackboard 课程列表",
+      description: "列出 elearning（Blackboard）上你注册的课程及课程 id，后续通知/作业/课件工具都用这个 id。",
+      inputSchema: z.object({ session: z.string().min(1).describe("ids_login 返回的 session 句柄") }),
+      outputSchema: z.object({
+        count: z.number(),
+        courses: z.array(z.object({ id: z.string(), name: z.string(), code: z.string().nullable() })),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ session }) => {
+      try {
+        const courses = await bbCourses(await platformAuth(session, deriveBlackboardSession));
+        return structured(
+          [`共 ${courses.length} 门课程：`, ...courses.map((c) => `#${c.id} ${c.name}${c.code ? ` (${c.code})` : ""}`)].join("\n"),
+          { count: courses.length, courses },
+        );
+      } catch (cause) {
+        return campusFailure("elearning 课程查询失败", cause);
+      }
+    },
+  );
+
+  defineTool(server,
+    "elearning_announcements",
+    {
+      title: "Blackboard 通知公告",
+      description: "读取通知公告：给定 course_id 读课程通知；省略则读机构级公告。返回标题、发布时间与正文摘要。",
+      inputSchema: z.object({
+        session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
+        course_id: z.string().optional().describe("课程 id（如 _5659_1），省略则读机构公告"),
+        limit: z.number().int().min(1).max(50).default(10).describe("最多返回条数"),
+      }),
+      outputSchema: z.object({
+        count: z.number(),
+        items: z.array(z.object({ id: z.string(), title: z.string(), published: z.string().nullable(), body: z.string() })),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ session, course_id, limit }) => {
+      try {
+        const items = await bbAnnouncements(await platformAuth(session, deriveBlackboardSession), course_id, limit);
+        if (items.length === 0) return structured(course_id ? "该课程暂无通知公告。" : "暂无机构公告。", { count: 0, items: [] });
+        return structured(
+          [
+            `共 ${items.length} 条公告：`,
+            ...items.map((a) => `[${a.published ?? "未知时间"}] ${a.title}\n  ${a.body.slice(0, 200)}`),
+          ].join("\n"),
+          { count: items.length, items: items.map((a) => ({ ...a, body: a.body.slice(0, 1200) })) },
+        );
+      } catch (cause) {
+        return campusFailure("elearning 公告查询失败", cause);
+      }
+    },
+  );
+
+  defineTool(server,
+    "elearning_assignments",
+    {
+      title: "Blackboard 作业与截止日期",
+      description: "汇总 Blackboard 所有课程的作业/评分项及其截止时间（来自日历接口），并给出提交入口。",
+      inputSchema: z.object({
+        session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
+        limit: z.number().int().min(1).max(100).default(50).describe("最多返回条数"),
+      }),
+      outputSchema: z.object({
+        count: z.number(),
+        items: z.array(
+          z.object({
+            id: z.string(),
+            title: z.string(),
+            course: z.string(),
+            due: z.string().nullable(),
+            attemptable: z.boolean(),
+          }),
+        ),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ session, limit }) => {
+      try {
+        const items = await bbAssignments(await platformAuth(session, deriveBlackboardSession), limit);
+        if (items.length === 0) return structured("没有待提交的作业。", { count: 0, items: [] });
+        const lines = items.map(
+          (a) => `[${a.course}] ${a.title} | 截止 ${a.due ?? "未设置"}${a.attemptable ? "（可提交）" : ""}`,
+        );
+        return structured([`共 ${items.length} 条作业：`, ...lines].join("\n"), {
+          count: items.length,
+          items: items.map(({ url: _url, ...rest }) => rest),
+        });
+      } catch (cause) {
+        return campusFailure("elearning 作业查询失败", cause);
+      }
+    },
+  );
+
+  defineTool(server,
+    "elearning_contents",
+    {
+      title: "Blackboard 课件目录",
+      description: "列出课程内容目录（文件夹与文件）。给定 course_id 看顶层；给定 content_id 进入子文件夹。文件条目会给出 /bbcswebdav/ 路径，供 elearning_download 下载。",
+      inputSchema: z.object({
+        session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
+        course_id: z.string().min(1).describe("课程 id"),
+        content_id: z.string().optional().describe("文件夹 content_id（可选，省略看顶层）"),
+      }),
+      outputSchema: z.object({
+        count: z.number(),
+        items: z.array(z.object({ kind: z.enum(["folder", "file"]), name: z.string(), ref: z.string() })),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ session, course_id, content_id }) => {
+      try {
+        const items = await bbContents(await platformAuth(session, deriveBlackboardSession), course_id, content_id);
+        if (items.length === 0) return structured("该目录为空。", { count: 0, items: [] });
+        return structured(
+          [
+            `共 ${items.length} 项：`,
+            ...items.map((i) => (i.kind === "folder" ? `[目录] ${i.name} (${i.ref})` : `[文件] ${i.name}  ${i.ref}`)),
+          ].join("\n"),
+          { count: items.length, items },
+        );
+      } catch (cause) {
+        return campusFailure("elearning 课件目录查询失败", cause);
+      }
+    },
+  );
+
+  defineTool(server,
+    "elearning_download",
+    {
+      title: "Blackboard 课件下载",
+      description: "为 elearning_contents 返回的文件路径生成 10 分钟有效的下载链接（链接由本服务代理，自带登录态，可直接点开/curl）。",
+      inputSchema: z.object({
+        session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
+        path: z.string().min(1).describe("elearning_contents 返回的 /bbcswebdav/… 路径"),
+        name: z.string().optional().describe("下载文件名（可选，默认取路径末段）"),
+      }),
+      outputSchema: z.object({
+        url: z.string(),
+        path: z.string(),
+        expiresMinutes: z.number(),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ session, path, name }, ctx) => {
+      if (!path.startsWith("/bbcswebdav/")) {
+        return { content: [{ type: "text" as const, text: "path 必须是 /bbcswebdav/ 开头的课件路径。" }], isError: true };
+      }
+      try {
+        const auth = await platformAuth(session, deriveBlackboardSession);
+        const origin =
+          ctx.http?.req?.url ??
+          process.env.PUBLIC_BASE_URL ??
+          "https://shanghaitech-mcp.vercel.app";
+        const url = downloadUrl(new URL(origin).origin, auth.jar ?? {}, path, name ?? path.split("/").pop() ?? "file");
+        return structured(`下载链接（10 分钟内有效）：\n${url}`, { url, path, expiresMinutes: 10 });
+      } catch (cause) {
+        return campusFailure("elearning 下载链接生成失败", cause);
+      }
     },
   );
 }

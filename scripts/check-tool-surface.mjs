@@ -13,7 +13,7 @@ const token = process.env.MCP_AUTH_TOKEN;
 
 const PLATFORMS = new Set(["coursebench", "eams", "egate", "libspace", "oa", "elearning", "campus", "ids", "ecourse"]);
 const NAME_RE = /^[a-z][a-z0-9]*(_[a-z0-9]+)+$/;
-const TOTAL_BUDGET = 25;
+const TOTAL_BUDGET = 30;
 const PLATFORM_BUDGET = 6;
 
 const errors = [];
