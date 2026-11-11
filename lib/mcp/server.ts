@@ -8,6 +8,8 @@ import {
   searchCourses,
   type CourseSummary,
 } from "@/lib/campus/coursebench";
+import { CampusSessionExpired, deriveEamsSession, eamsProfile, eamsSemesters } from "@/lib/campus/eams";
+import { deriveEgateSession, egateStudent } from "@/lib/campus/egate";
 import { login, mintServiceTicket, type CookieJar } from "@/lib/campus/ids-auth";
 import { seal, unseal } from "@/lib/campus/seal";
 
@@ -241,6 +243,92 @@ export function registerCampusTools(server: McpServer): void {
           ? `有效：${token.userId}，句柄 ${expires} 到期；已成功换取 service ticket。`
           : `已失效：${token.userId}，请重新 ids_login。`,
       );
+    },
+  );
+
+  server.registerTool(
+    "eams_profile",
+    {
+      title: "EAMS 身份（验证会话）",
+      description:
+        "用 ids_login 的 session 走一遍 CAS 票据链登录教务系统（EAMS），返回姓名与学号。用于确认会话是否可用。",
+      inputSchema: z.object({
+        session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ session }) => {
+      let cookies: CookieJar;
+      try {
+        cookies = unseal<IdsSessionToken>(session).cookies;
+      } catch (cause) {
+        return { content: [{ type: "text" as const, text: `session 无效：${(cause as Error).message}` }], isError: true };
+      }
+      try {
+        const profile = await eamsProfile(await deriveEamsSession(cookies));
+        return text(`EAMS 会话可用：${profile.name ?? "姓名未知"}（学号 ${profile.studentId ?? "未知"}）`);
+      } catch (cause) {
+        const message = cause instanceof CampusSessionExpired ? cause.message : (cause as Error).message;
+        return { content: [{ type: "text" as const, text: `EAMS 登录失败：${message}` }], isError: true };
+      }
+    },
+  );
+
+  server.registerTool(
+    "eams_semesters",
+    {
+      title: "EAMS 学期列表",
+      description: "列出教务系统可选学期及其 id（后续查询课表/考试需要），并标出默认学期。",
+      inputSchema: z.object({
+        session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ session }) => {
+      let cookies: CookieJar;
+      try {
+        cookies = unseal<IdsSessionToken>(session).cookies;
+      } catch (cause) {
+        return { content: [{ type: "text" as const, text: `session 无效：${(cause as Error).message}` }], isError: true };
+      }
+      try {
+        const result = await eamsSemesters(await deriveEamsSession(cookies));
+        const lines = result.semesters.map(
+          (s) => `${s.id === result.defaultSemester ? "★ " : "  "}${s.year} ${s.name} (id=${s.id})`,
+        );
+        return text([`共 ${result.semesters.length} 个学期：`, ...lines].join("\n"));
+      } catch (cause) {
+        const message = cause instanceof CampusSessionExpired ? cause.message : (cause as Error).message;
+        return { content: [{ type: "text" as const, text: `EAMS 查询失败：${message}` }], isError: true };
+      }
+    },
+  );
+
+  server.registerTool(
+    "egate_student",
+    {
+      title: "eGate 学生信息（第二个平台）",
+      description:
+        "用同一个 ids_login session 走 mod_auth_cas 网关登录 eGate 服务大厅，返回学号/姓名。用于验证「一个 CASTGC 换多个平台会话」的链路。",
+      inputSchema: z.object({
+        session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ session }) => {
+      let cookies: CookieJar;
+      try {
+        cookies = unseal<IdsSessionToken>(session).cookies;
+      } catch (cause) {
+        return { content: [{ type: "text" as const, text: `session 无效：${(cause as Error).message}` }], isError: true };
+      }
+      try {
+        const student = await egateStudent(await deriveEgateSession(cookies));
+        return text(`eGate 会话可用：${student.name ?? "姓名未知"}（学号 ${student.studentId ?? "未知"}）`);
+      } catch (cause) {
+        const message = cause instanceof CampusSessionExpired ? cause.message : (cause as Error).message;
+        return { content: [{ type: "text" as const, text: `eGate 登录失败：${message}` }], isError: true };
+      }
     },
   );
 }

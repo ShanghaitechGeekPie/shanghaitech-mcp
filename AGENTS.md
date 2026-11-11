@@ -22,14 +22,20 @@ lib/mcp/server.ts           registers tools; each tool is a thin adapter
   │
   ▼
 lib/campus/*.ts             one module per upstream platform
-  └─ coursebench.ts         fetch + envelope unwrap + filtering
+  └─ coursebench.ts         public data, no auth
   └─ ids.ts                 CAS URLs + p3/serviceValidate ticket redemption
+  └─ ids-auth.ts            password login → CASTGC, error mapping
+  └─ http.ts                cookie jar + manual redirect following (shared)
+  └─ eams.ts / egate.ts     platform adapters: CASTGC → platform cookies → data
 ```
 
 Key properties to preserve:
 
 - **Stateless by construction.** `mcp-handler@2` builds the server per request; there is no `Mcp-Session-Id`, no in-memory `Map`, no SSE session store. Anything that must survive across tool calls becomes an explicit handle argument backed by a real store (Postgres/Redis) — never module-level state, because Vercel instances are not shared.
-- **One module per upstream platform** under `lib/campus/`, exposing typed functions plus a typed error class (`CourseBenchError`). Tool code only formats; it does not `fetch` upstream APIs directly.
+- **One module per upstream platform** under `lib/campus/`, exposing typed functions plus a typed error class (`CourseBenchError`, `CampusSessionExpired`). Tool code only formats; it does not `fetch` upstream APIs directly.
+- **Platform session pattern**: never hardcode a CAS `service=`. Request the platform's own entry URL with the CASTGC in the jar and let the site 302 to IDS itself; follow every hop with `follow()` from `lib/campus/http.ts` so each `Set-Cookie` is captured. Success = final URL is not on `ids.shanghaitech.edu.cn` and the body lacks `统一身份认证`.
+- **Every platform needs its priming call** before data endpoints: EAMS `/eams/home.action`, eGate `/xsfw/sys/funauthapp/api/getAppConfig/xshdapp-4770201649822494.do?v=<ts>`. Without it the first data call returns an uninitialized shell.
+- **Consumed tickets are single-use**: never retry a hop that carried `ticket=ST-…`; re-derive the whole platform session instead.
 - **Failures are data.** Upstream errors are converted into MCP tool results with `isError: true` and a readable Chinese message; they never throw out of the handler.
 - **Auth is credential login, not OAuth.** `ids_login` takes IDS username + password, performs the real CAS form login (`GET login page → checkNeedCaptcha → POST login → CASTGC`), and returns an opaque `v1.<iv>.<tag>.<ct>` handle sealed with AES-256-GCM (`MCP_ENC_KEY`). Passwords are used in-request and never persisted. Campus state travels in the handle — no DB, no session store, no memory.
 - **Captcha is part of the contract.** IDS escalates captcha by egress IP. `ids_login` returns an image + encrypted `continuation` instead of retrying; never auto-retry a failed login.
@@ -45,6 +51,8 @@ Key properties to preserve:
 | `lib/campus/ids-auth.ts` | Password login: page parsing, `encryptPassword` (AES-128-CBC port of site JS), manual cookie jar, error-code mapping, service-ticket minting. |
 | `lib/campus/ids.ts` | CAS URLs + p3/serviceValidate ticket redemption (server-to-server). |
 | `lib/campus/seal.ts` | AES-256-GCM sealing of session handles (`seal`/`unseal`, 12 h TTL enforced on open). |
+| `lib/campus/http.ts` | Shared cookie jar + `follow()` (manual redirects, per-hop `Set-Cookie`). |
+| `lib/campus/eams.ts`, `egate.ts` | Platform adapters ported from `/home/zambar/repos/shanghaitech-cpdaily-auth` (TechPie backend). |
 | `scripts/smoke-mcp.sh` | initialize + tools/list against a running endpoint. |
 
 ## Development Commands
@@ -102,6 +110,7 @@ curl -s -X POST http://localhost:3000/api/mcp \
 
 - No unit-test framework yet. Gates before pushing: `pnpm lint` (tsc) and `pnpm build`, then `scripts/smoke-mcp.sh` against a running build.
 - Manual protocol verification uses the MCP Inspector (`pnpm mcp:inspect`) or the `curl` snippet above; a real client (Claude/Cursor) is the final check for auth/connector behaviour.
+- Platform adapters can be smoke-tested without credentials: run a `.ts` probe with `bun` (Node's type stripping cannot resolve extensionless relative imports) passing `{CASTGC: "TGT-fake"}`; the expected result is `CampusSessionExpired`.
 - `ids_login` smoke test uses a **non-existent** student id (e.g. `0000000000`) with any password: the expected, verified result is `登录失败（bad_credentials）：用户名或密码错误`. A success there would mean the mock is wrong; a `session_expired` error means the AES port or cookie jar broke.
 - When platform clients grow logic (parsing, retries, credential derivation), add `vitest` and test the pure functions (`averageScore`, ticket-response parsing, error-string classification). Do not write tests that only assert a fetch was called.
 - Never test campus flows with real credentials from CI. Captcha escalation on IDS is keyed to **egress IP**; repeated failed logins from one host poison captcha state for every user behind that IP.

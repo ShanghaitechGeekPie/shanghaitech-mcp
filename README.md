@@ -10,6 +10,9 @@
 | CourseBench 课程搜索 / 详情 / 点评（公开数据） | ✅ 可用 |
 | IDS 用户名+密码登录（`ids_login`，换 12 小时 session 句柄） | ✅ 可用（含验证码两段式） |
 | IDS 票据校验 / service ticket 换取 | ✅ `lib/campus/ids.ts`、`lib/campus/ids-auth.ts` |
+| 一个 CASTGC 换多平台会话（EAMS / eGate） | ✅ `lib/campus/{http,eams,egate}.ts` |
+| EAMS 身份 / 学期列表 | ✅ 工具 `eams_profile`、`eams_semesters` |
+| eGate 学生信息 | ✅ 工具 `egate_student` |
 | 静态 bearer token 兜底（IDE/CI） | ✅ `MCP_AUTH_TOKEN` |
 
 ## 为什么是 Next.js + Vercel
@@ -42,6 +45,25 @@ POST /authserver/login?service=<svc>
 密码密文 = `base64(AES-128-CBC(key=utf8(盐), iv=utf8(随机16), data=utf8(随机64)+密码, PKCS7))`。
 
 两个坑已在代码里处理：`Set-Cookie` 畸形（重复 `secure` + 空值 cookie，普通 cookie jar 会丢掉 `JSESSIONID`，必须手工收集/回放）；验证码按**出口 IP** 升级，所以 `ids_login` 从不盲目重试——需要验证码时返回图片 + `continuation`，由人看清后带上重试。
+
+### 平台会话链（一个 TGC 换多个平台）
+
+`ids_login` 拿到的 CASTGC 是根凭证。每个平台只要用**它自己的入口 URL** 打一次带 `CASTGC` 的请求，目标站点会自己 302 到 IDS 拿 service ticket，再 302 回来种下自己的会话 cookie：
+
+```
+CASTGC ──GET <平台入口 URL>──▶ 302 ids…/authserver/login?service=<平台自己生成的>
+       ◀──302 <平台>?ticket=ST-…──  （消费票据）
+       ◀──200 + Set-Cookie: JSESSIONID / MOD_AUTH_CAS──▶ 平台会话
+```
+
+关键点（踩过的坑）：
+
+- **不用硬编码 `service=`**：EAMS（Spring CAS filter）和 eGate（`mod_auth_cas`）都会在 302 里生成自己的 service，照着重定向走就行；OA 的入口 URL 自带 `workflowid` 查询串，也是同理。
+- **必须手工跟重定向**：JavaScript `fetch` 的 `redirect: "follow"` 拿不到中间跳的 `Set-Cookie`。`lib/campus/http.ts` 的 `follow()` 逐跳收集 cookie。
+- **每个平台都有「预热」**：EAMS 要先 `home.action`，否则 `courseTableForStd.action` 只回一个空壳；eGate 要先打 `getAppConfig/xshdapp-…do`，否则 `MOD_AUTH_CAS` 不刷新。
+- **失效判定**：最终 URL 落在 `ids…` 或正文出现「统一身份认证」就是会话死了，重新 `ids_login`，不要盲目重试（消费过的 ticket 重放必失败）。
+
+已实现：EAMS（身份 + 学期列表）、eGate（学生信息）。参考实现是 `shanghaitech-cpdaily-auth`（TechPie 后端），逐行对照移植。
 
 ## 本地开发
 
