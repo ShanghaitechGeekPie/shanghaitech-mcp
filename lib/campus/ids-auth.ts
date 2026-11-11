@@ -257,20 +257,4 @@ export async function login(input: LoginInput): Promise<LoginOutcome> {
   return { kind: "failed", ...failureFromHtml(errorHtml), cookies: jar };
 }
 
-/**
- * Mint a service ticket from an existing CASTGC session. Returns the redirect
- * URL when the session is still alive, null when IDS wants a fresh login.
- */
-export async function mintServiceTicket(cookies: CookieJar, service: string): Promise<string | null> {
-  const res = await fetch(`${IDS_BASE_URL}${LOGIN_PATH}?service=${encodeURIComponent(service)}`, {
-    headers: { cookie: cookieHeader(cookies), accept: "text/html" },
-    redirect: "manual",
-    cache: "no-store",
-    signal: AbortSignal.timeout(10_000),
-  });
-  const location = locationOf(res, IDS_BASE_URL);
-  if (res.status >= 300 && res.status < 400 && location?.includes("ticket=")) return location;
-  return null;
-}
-
 export { cookieHeader };

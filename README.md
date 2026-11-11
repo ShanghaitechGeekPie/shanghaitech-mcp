@@ -90,7 +90,7 @@ pnpm dev                 # http://localhost:3000
 # 本机若要走代理出网（eCourse/EAMS 等校园域名）：NODE_OPTIONS=--use-env-proxy pnpm dev
 ```
 
-环境变量至少要有 `MCP_ENC_KEY`（`openssl rand -base64 32`），否则 `ids_login` 会明确报错。
+环境变量至少要有 `MCP_ENC_KEY`（`openssl rand -base64 32`），否则 `ids_login` 会明确报错。生产还需要 `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN`（会话两级缓存；本地缺失时退化为进程内 Map）。
 
 `ids_login` 支持 `lang: "zh_CN" | "en"`：IDS 会记住登录时的语言，**EAMS 页面随之显示中文/英文**（实测：英文登录 → EAMS 英文；中文登录 → EAMS 中文，考试类型显示「期中考试」）。不传则沿用账号当前设置。
 

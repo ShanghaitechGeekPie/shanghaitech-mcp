@@ -11,10 +11,9 @@ import {
 } from "@/lib/campus/coursebench";
 import { PLATFORM_TITLES, type PlatformId } from "@/lib/campus/catalog";
 import { findCampus } from "@/lib/mcp/find";
-import { CampusSessionExpired, deriveEamsSession, eamsExams, eamsProfile, eamsSemesters } from "@/lib/campus/eams";
+import { CampusSessionExpired, eamsExams, eamsProfile, eamsSemesters } from "@/lib/campus/eams";
 import {
   EcourseError,
-  deriveEcourseSession,
   listActivities,
   listCourses,
   listEnrollments,
@@ -31,13 +30,12 @@ import {
   deriveBlackboardSession,
 } from "@/lib/campus/elearning";
 import { downloadUrl } from "@/lib/campus/download";
-import { deriveEgateSession, egateStudent } from "@/lib/campus/egate";
+import { egateStudent } from "@/lib/campus/egate";
 import {
   LibspaceError,
   createReservation,
   extendOptions,
   listRooms,
-  libspaceSession,
   me as libspaceMe,
   reservationAction,
   reservation as libspaceReservation,
@@ -47,17 +45,18 @@ import {
   searchUsers,
   type SpaceType,
 } from "@/lib/campus/libspace";
-import { login, mintServiceTicket, type CookieJar } from "@/lib/campus/ids-auth";
+import { login, type CookieJar } from "@/lib/campus/ids-auth";
 import { seal, unseal } from "@/lib/campus/seal";
+import {
+  newSessionId,
+  platformAuth,
+  putRoot,
+  sessionHandle,
+  sessionInfo,
+  type PlatformKey,
+} from "@/lib/campus/session-store";
 
-const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const CONTINUATION_TTL_MS = 10 * 60 * 1000;
-
-interface IdsSessionToken {
-  userId: string;
-  cookies: CookieJar;
-  service: string;
-}
 
 interface CaptchaContinuation {
   cookies: CookieJar;
@@ -84,18 +83,6 @@ function courseLine(c: CourseSummary): string {
     avg === null ? "暂无评分" : `均分 ${avg.toFixed(2)}`,
     `${c.comment_num} 条点评`,
   ].join(" | ");
-}
-
-/** One sealed handle in, one platform AuthContext out — tools never see the credential shape. */
-async function platformAuth<T extends object>(
-  session: string,
-  derive: (root: CookieJar) => Promise<T>,
-): Promise<T> {
-  return derive(unseal<IdsSessionToken>(session).cookies);
-}
-
-async function ecourseAuth(session: string) {
-  return platformAuth(session, deriveEcourseSession);
 }
 
 function formatDeadline(iso: string | null | undefined): string {
@@ -362,10 +349,9 @@ export function registerCampusTools(server: McpServer): void {
           };
         }
 
-        const session = seal<IdsSessionToken>(
-          { userId: outcome.userId, cookies: outcome.cookies, service: outcome.service },
-          SESSION_TTL_MS,
-        );
+        const sid = newSessionId();
+        await putRoot(sid, { userId: outcome.userId, cookies: outcome.cookies });
+        const session = sessionHandle(sid);
         const cookies = Object.keys(outcome.cookies).sort().join(", ");
         return {
           content: [
@@ -373,7 +359,7 @@ export function registerCampusTools(server: McpServer): void {
               type: "text" as const,
               text:
                 `登录成功：${outcome.userId}\n` +
-                `session（12 小时内有效，等价于登录态）：\n${session}\n` +
+                `session（ticket 12 小时，派生会话 30 分钟自动续签）：\n${session}\n` +
                 `已获得的 cookie：${cookies}`,
             },
           ],
@@ -401,20 +387,22 @@ export function registerCampusTools(server: McpServer): void {
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ session }) => {
-      let token: IdsSessionToken & { exp: number };
+      let info;
       try {
-        token = unseal<IdsSessionToken>(session);
+        info = await sessionInfo(session);
       } catch (cause) {
         return { content: [{ type: "text" as const, text: `session 无效：${(cause as Error).message}` }], isError: true };
       }
-      const probe = "https://ids.shanghaitech.edu.cn/authserver/index.do";
-      const ticket = await mintServiceTicket(token.cookies, probe);
-      const expires = new Date(token.exp).toISOString();
+      if (!info) {
+        return structured("ticket 已失效：请重新 ids_login。", { userId: "", expiresAt: "", alive: false });
+      }
+      const expires = new Date(info.rootExpiresAt).toISOString();
+      const derived = Object.entries(info.derived)
+        .map(([p, exp]) => `${p}@${new Date(exp as number).toLocaleTimeString("zh-CN", { hour12: false })}`)
+        .join("、");
       return structured(
-        ticket
-          ? `有效：${token.userId}，句柄 ${expires} 到期；已成功换取 service ticket。`
-          : `已失效：${token.userId}，请重新 ids_login。`,
-        { userId: token.userId, expiresAt: expires, alive: Boolean(ticket) },
+        `有效：${info.userId}，ticket ${expires} 到期${derived ? `；缓存会话：${derived}` : "；暂无派生会话"}`,
+        { userId: info.userId, expiresAt: expires, alive: true },
       );
     },
   );
@@ -432,14 +420,8 @@ export function registerCampusTools(server: McpServer): void {
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ session }) => {
-      let cookies: CookieJar;
       try {
-        cookies = unseal<IdsSessionToken>(session).cookies;
-      } catch (cause) {
-        return { content: [{ type: "text" as const, text: `session 无效：${(cause as Error).message}` }], isError: true };
-      }
-      try {
-        const profile = await eamsProfile(await deriveEamsSession(cookies));
+        const profile = await eamsProfile(await platformAuth(session, "eams"));
         return structured(`EAMS 会话可用：${profile.name ?? "姓名未知"}（学号 ${profile.studentId ?? "未知"}）`, {
           name: profile.name,
           studentId: profile.studentId,
@@ -466,14 +448,8 @@ export function registerCampusTools(server: McpServer): void {
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ session }) => {
-      let cookies: CookieJar;
       try {
-        cookies = unseal<IdsSessionToken>(session).cookies;
-      } catch (cause) {
-        return { content: [{ type: "text" as const, text: `session 无效：${(cause as Error).message}` }], isError: true };
-      }
-      try {
-        const result = await eamsSemesters(await deriveEamsSession(cookies));
+        const result = await eamsSemesters(await platformAuth(session, "eams"));
         const lines = result.semesters.map(
           (s) => `${s.id === result.defaultSemester ? "★ " : "  "}${s.year} ${s.name} (id=${s.id})`,
         );
@@ -520,7 +496,7 @@ export function registerCampusTools(server: McpServer): void {
     },
     async ({ session, semester_id, batch_id }) => {
       try {
-        const auth = await deriveEamsSession(unseal<IdsSessionToken>(session).cookies);
+        const auth = await platformAuth(session, "eams");
         const semesterId = semester_id ?? (await eamsSemesters(auth)).defaultSemester;
         if (!semesterId) return { content: [{ type: "text" as const, text: "EAMS 未返回默认学期，请显式传 semester_id。" }], isError: true };
         const { batch, exams } = await eamsExams(auth, semesterId, batch_id);
@@ -565,14 +541,8 @@ export function registerCampusTools(server: McpServer): void {
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ session }) => {
-      let cookies: CookieJar;
       try {
-        cookies = unseal<IdsSessionToken>(session).cookies;
-      } catch (cause) {
-        return { content: [{ type: "text" as const, text: `session 无效：${(cause as Error).message}` }], isError: true };
-      }
-      try {
-        const student = await egateStudent(await deriveEgateSession(cookies));
+        const student = await egateStudent(await platformAuth(session, "egate"));
         return structured(`eGate 会话可用：学号 ${student.studentId ?? "未知"}`, { studentId: student.studentId });
       } catch (cause) {
         const message = cause instanceof CampusSessionExpired ? cause.message : (cause as Error).message;
@@ -605,7 +575,7 @@ export function registerCampusTools(server: McpServer): void {
     },
     async ({ session }) => {
       try {
-        const profile = await libspaceMe(await platformAuth(session, libspaceSession));
+        const profile = await libspaceMe(await platformAuth(session, "libspace"));
         const violations = (profile.violationCountList ?? []).map((v) => ({
           type: typeof v.reservationType === "string" ? v.reservationType : "?",
           count: typeof v.violationCount === "number" ? v.violationCount : null,
@@ -682,7 +652,7 @@ export function registerCampusTools(server: McpServer): void {
     },
     async ({ session, date, type, floor, limit }) => {
       try {
-        const auth = await platformAuth(session, libspaceSession);
+        const auth = await platformAuth(session, "libspace");
         const rooms = (await listRooms(auth, { date, type, pageSize: 100 })).filter(
           (r) => floor === undefined || r.floorNo === floor,
         );
@@ -760,7 +730,7 @@ export function registerCampusTools(server: McpServer): void {
     },
     async ({ session, space_id, date }) => {
       try {
-        const detail = await libspaceSchedule(await platformAuth(session, libspaceSession), space_id, date);
+        const detail = await libspaceSchedule(await platformAuth(session, "libspace"), space_id, date);
         const segments = mergeSegments(detail.slots);
         return structured(`${detail.date} 空间 #${detail.spaceId}：\n${formatSegments(segments)}`, {
           spaceId: detail.spaceId,
@@ -832,7 +802,7 @@ export function registerCampusTools(server: McpServer): void {
     },
     async ({ session, reservation_id, tab, space_type, room_name, status, date_start, date_end, limit }) => {
       try {
-        const auth = await platformAuth(session, libspaceSession);
+        const auth = await platformAuth(session, "libspace");
         if (reservation_id) {
           const detail = await libspaceReservation(auth, reservation_id);
           const options = await extendOptions(auth, reservation_id, detail.endTime).catch(() => null);
@@ -934,7 +904,7 @@ export function registerCampusTools(server: McpServer): void {
     },
     async ({ session, space_id, space_type, date, start_time, end_time, title, meeting_type, inviter_keywords, confirm }) => {
       try {
-        const auth = await platformAuth(session, libspaceSession);
+        const auth = await platformAuth(session, "libspace");
         const [detail, config] = await Promise.all([libspaceSchedule(auth, space_id, date), spaceConfig(auth, space_type)]);
 
         const wants = detail.slots.filter((s) => s.time >= start_time && s.time < end_time);
@@ -1010,7 +980,7 @@ export function registerCampusTools(server: McpServer): void {
         return text(`将对预约 #${reservation_id} 执行：${label}。确认后带 confirm: true 重新调用。`);
       }
       try {
-        const auth = await platformAuth(session, libspaceSession);
+        const auth = await platformAuth(session, "libspace");
         const receipt = await reservationAction(auth, reservation_id, action, { hours });
         return text(`已执行${label}，平台回执：${receipt}`);
       } catch (cause) {
@@ -1047,7 +1017,7 @@ export function registerCampusTools(server: McpServer): void {
     },
     async ({ session }) => {
       try {
-        const courses = await listCourses(await ecourseAuth(session));
+        const courses = await listCourses(await platformAuth(session, "ecourse"));
         const lines = courses.map(
           (c) =>
             `#${c.id} ${c.name}${c.course_code ? ` (${c.course_code})` : ""} | ${c.department?.name ?? "-"} | ${
@@ -1102,7 +1072,7 @@ export function registerCampusTools(server: McpServer): void {
     },
     async ({ session, course_id, include_closed, course_limit, limit }) => {
       try {
-        const auth = await ecourseAuth(session);
+        const auth = await platformAuth(session, "ecourse");
         const courses = (await listCourses(auth))
           .filter((c) => course_id === undefined || c.id === course_id)
           .slice(0, course_limit);
@@ -1166,7 +1136,7 @@ export function registerCampusTools(server: McpServer): void {
     },
     async ({ session, course_id, course_limit, limit }) => {
       try {
-        const auth = await ecourseAuth(session);
+        const auth = await platformAuth(session, "ecourse");
         const courses = (await listCourses(auth))
           .filter((c) => course_id === undefined || c.id === course_id)
           .slice(0, course_limit);
@@ -1221,7 +1191,7 @@ export function registerCampusTools(server: McpServer): void {
     },
     async ({ session, course_id, limit }) => {
       try {
-        const enrollments = await listEnrollments(await ecourseAuth(session), course_id);
+        const enrollments = await listEnrollments(await platformAuth(session, "ecourse"), course_id);
         const students = enrollments
           .filter((e) => e.roles.includes("student"))
           .map((e) => ({
@@ -1269,7 +1239,7 @@ export function registerCampusTools(server: McpServer): void {
     },
     async ({ session, course_id, limit }) => {
       try {
-        const activities = await listActivities(await ecourseAuth(session), course_id);
+        const activities = await listActivities(await platformAuth(session, "ecourse"), course_id);
         const items = activities
           .filter((a) => a.type === "material")
           .map((a) => ({
@@ -1313,7 +1283,7 @@ export function registerCampusTools(server: McpServer): void {
     },
     async ({ session, upload_id }) => {
       try {
-        const auth = await ecourseAuth(session);
+        const auth = await platformAuth(session, "ecourse");
         const [info, signed] = await Promise.all([uploadInfo(auth, upload_id), uploadUrl(auth, upload_id)]);
         const expires = signed.expiresAt ? new Date(signed.expiresAt).toISOString() : null;
         return {
@@ -1449,7 +1419,7 @@ export function registerCampusTools(server: McpServer): void {
     },
     async ({ session }) => {
       try {
-        const courses = await bbCourses(await platformAuth(session, deriveBlackboardSession));
+        const courses = await bbCourses(await platformAuth(session, "elearning"));
         return structured(
           [`共 ${courses.length} 门课程：`, ...courses.map((c) => `#${c.id} ${c.name}${c.code ? ` (${c.code})` : ""}`)].join("\n"),
           { count: courses.length, courses },
@@ -1478,7 +1448,7 @@ export function registerCampusTools(server: McpServer): void {
     },
     async ({ session, course_id, limit }) => {
       try {
-        const items = await bbAnnouncements(await platformAuth(session, deriveBlackboardSession), course_id, limit);
+        const items = await bbAnnouncements(await platformAuth(session, "elearning"), course_id, limit);
         if (items.length === 0) return structured(course_id ? "该课程暂无通知公告。" : "暂无机构公告。", { count: 0, items: [] });
         return structured(
           [
@@ -1518,7 +1488,7 @@ export function registerCampusTools(server: McpServer): void {
     },
     async ({ session, limit }) => {
       try {
-        const items = await bbAssignments(await platformAuth(session, deriveBlackboardSession), limit);
+        const items = await bbAssignments(await platformAuth(session, "elearning"), limit);
         if (items.length === 0) return structured("没有待提交的作业。", { count: 0, items: [] });
         const lines = items.map(
           (a) => `[${a.course}] ${a.title} | 截止 ${a.due ?? "未设置"}${a.attemptable ? "（可提交）" : ""}`,
@@ -1551,7 +1521,7 @@ export function registerCampusTools(server: McpServer): void {
     },
     async ({ session, course_id, content_id }) => {
       try {
-        const items = await bbContents(await platformAuth(session, deriveBlackboardSession), course_id, content_id);
+        const items = await bbContents(await platformAuth(session, "elearning"), course_id, content_id);
         if (items.length === 0) return structured("该目录为空。", { count: 0, items: [] });
         return structured(
           [
@@ -1588,7 +1558,7 @@ export function registerCampusTools(server: McpServer): void {
         return { content: [{ type: "text" as const, text: "path 必须是 /bbcswebdav/ 开头的课件路径。" }], isError: true };
       }
       try {
-        const auth = await platformAuth(session, deriveBlackboardSession);
+        const auth = await platformAuth(session, "elearning");
         const origin =
           ctx.http?.req?.url ??
           process.env.PUBLIC_BASE_URL ??
