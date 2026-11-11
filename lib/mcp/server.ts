@@ -34,8 +34,12 @@ import {
   ElrcError,
   courseInfo as elrcCourseInfo,
   ELRC_BASE,
+  courseDetail as elrcCourseDetail,
+  currentSemester as elrcCurrentSemester,
   listClips as elrcListClips,
   listCourses as elrcListCourses,
+  myCourses as elrcMyCourses,
+  parseSemesterName,
   recordingSummary as elrcRecordingSummary,
   transcript as elrcTranscript,
 } from "@/lib/campus/elrc";
@@ -1591,56 +1595,55 @@ export function registerCampusTools(server: McpServer): void {
   defineTool(server,
     "elrc_courses",
     {
-      title: "ELRC 课程录播列表",
+      title: "ELRC 我的课程（当前学期）",
       description:
-        "搜索/列出 ELRC（虚拟教学社区·在线课堂）的课程录播：课程名、课程号、教师、上课时间地点。返回的 course_id + record_id 用于 elrc_course。",
+        "列出当前学期在 ELRC 学习空间注册的课程：课程 id、名称、课程号（如 CS181.01）、教师、上课时间地点，以及是否有录播。course_id 用于 elrc_course。",
       inputSchema: z.object({
         session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
-        keyword: z.string().optional().describe("课程名关键词"),
-        year: z.string().optional().describe("学年，如 2026-2027"),
-        semester: z.string().optional().describe("学期：秋季/春季/夏季"),
-        limit: z.number().int().min(1).max(50).default(20).describe("最多返回条数"),
+        semester: z.string().optional().describe("学期名，如 2026-2027学年秋季；省略用当前学期"),
+        limit: z.number().int().min(1).max(48).default(24).describe("最多返回条数"),
       }),
       outputSchema: z.object({
+        semester: z.string(),
         count: z.number(),
         courses: z.array(
           z.object({
-            recordId: z.number(),
             courseId: z.string(),
-            courseName: z.string(),
+            name: z.string(),
             serialNumber: z.string().nullable(),
+            courseNumber: z.string().nullable(),
             teachers: z.array(z.string()),
+            classTime: z.string().nullable(),
+            hasRecording: z.boolean(),
           }),
         ),
       }),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ session, keyword, year, semester, limit }) => {
+    async ({ session, semester, limit }) => {
       try {
         const auth = await platformAuth(session, "elrc");
-        const courses = await elrcListCourses(auth, { keyword, year, semester, size: limit });
-        if (courses.length === 0) return structured("没有匹配的课程录播。", { count: 0, courses: [] });
-        const items = courses.map((c) => {
-          let teachers: string[] = [];
-          try {
-            teachers = Object.values(JSON.parse(c.teachers ?? "{}") as Record<string, string>);
-          } catch {
-            teachers = [];
-          }
-          return {
-            recordId: c.id,
-            courseId: c.courseId,
-            courseName: c.courseName,
-            serialNumber: c.serialNumber ?? null,
-            teachers,
-          };
-        });
+        const sem = semester ? parseSemesterName(semester) : await elrcCurrentSemester(auth);
+        const mine = await elrcMyCourses(auth, sem.name);
+        const recordings = await elrcListCourses(auth, { year: sem.year, semester: sem.name.replace(/^\d{4}-\d{4}学年/, ""), size: 50 }).catch(() => []);
+        const recordingSerials = new Set(recordings.map((c) => c.serialNumber).filter(Boolean));
+        const items = mine.slice(0, limit).map((c) => ({
+          courseId: c.courseId,
+          name: c.name,
+          serialNumber: c.serialNumber,
+          courseNumber: c.courseNumber,
+          teachers: c.teachers,
+          classTime: c.classTime,
+          hasRecording: c.serialNumber ? recordingSerials.has(c.serialNumber) : false,
+        }));
         return structured(
           [
-            `共 ${items.length} 门课程录播：`,
-            ...items.map((c) => `#${c.recordId} ${c.courseName}${c.serialNumber ? ` (${c.serialNumber})` : ""} | ${c.teachers.join("/") || "-"} | course_id=${c.courseId}`),
+            `${sem.name}：共 ${items.length} 门课程`,
+            ...items.map(
+              (c) => `${c.name}${c.serialNumber ? ` (${c.serialNumber})` : ""} | ${c.teachers.join("/") || "-"} | ${c.classTime ?? "-"}${c.hasRecording ? " | 有录播" : ""} | course_id=${c.courseId}`,
+            ),
           ].join("\n"),
-          { count: items.length, courses: items },
+          { semester: sem.name, count: items.length, courses: items },
         );
       } catch (cause) {
         return campusFailure("ELRC 课程列表查询失败", cause);
@@ -1651,21 +1654,37 @@ export function registerCampusTools(server: McpServer): void {
   defineTool(server,
     "elrc_course",
     {
-      title: "ELRC 课程详情 + 回放切片",
+      title: "ELRC 课程详情（大纲/安排/平台/章节/回放）",
       description:
-        "按 course_id + record_id 读取课程详情（教师、院系、教室、周次安排），并列出某周各次课的机位切片（contentId 用于 elrc_recording / elrc_transcript / elrc_slides）。week 省略时选当前周（无数据则取第一个有录制的周）。",
+        "读取一门课的完整信息：学分学时、教学大纲（简介/目标/方法/内容安排/考核/诚信）、上课安排（星期/节次/周次/地点）、章节结构、关联第三方平台（Blackboard、eCourse 链接），并可列出录播机位切片（contentId 供 elrc_recording / elrc_transcript / elrc_slides 使用）。",
       inputSchema: z.object({
         session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
-        course_id: z.string().min(1).describe("ELRC course_id（UUID）"),
-        record_id: z.number().int().positive().describe("ELRC record id（数字）"),
-        week: z.string().optional().describe("周次，如 \"9\""),
-        year: z.string().optional().describe("学年"),
-        semester: z.string().optional().describe("学期"),
+        course_id: z.string().min(1).describe("elrc_courses 返回的 course_id"),
+        semester: z.string().optional().describe("学期名，省略用当前学期"),
+        include_recordings: z.boolean().default(true).describe("是否附带录播周次与切片"),
+        week: z.string().optional().describe("指定周次（如 \"9\"），省略取第一个有录播的周"),
       }),
       outputSchema: z.object({
-        courseName: z.string(),
-        teachers: z.array(z.string()),
-        weeks: z.array(
+        courseId: z.string(),
+        name: z.string(),
+        credits: z.string().nullable(),
+        classHour: z.string().nullable(),
+        syllabus: z
+          .object({
+            description: z.string().nullable(),
+            objectives: z.string().nullable(),
+            methods: z.string().nullable(),
+            schedule: z.string().nullable(),
+            assessment: z.string().nullable(),
+            integrity: z.string().nullable(),
+          })
+          .nullable(),
+        timetable: z.array(
+          z.object({ dayOfWeek: z.number().nullable(), slots: z.string().nullable(), weeks: z.string().nullable(), place: z.string().nullable(), teacher: z.string().nullable() }),
+        ),
+        platforms: z.array(z.object({ platform: z.string(), courseName: z.string().nullable(), teacher: z.string().nullable(), status: z.string().nullable(), url: z.string().nullable() })),
+        chapters: z.array(z.object({ name: z.string(), children: z.array(z.string()) })),
+        recordings: z.array(
           z.object({
             week: z.string(),
             sessions: z.array(
@@ -1673,7 +1692,7 @@ export function registerCampusTools(server: McpServer): void {
                 weekDay: z.string(),
                 weekDate: z.string().nullable(),
                 section: z.string().nullable(),
-                clips: z.array(z.object({ contentId: z.string(), seat: z.string().nullable(), asr: z.string().nullable() })),
+                clips: z.array(z.object({ contentId: z.string(), seat: z.string().nullable() })),
               }),
             ),
           }),
@@ -1681,58 +1700,86 @@ export function registerCampusTools(server: McpServer): void {
       }),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ session, course_id, record_id, week, year, semester }) => {
+    async ({ session, course_id, semester, include_recordings, week }) => {
       try {
         const auth = await platformAuth(session, "elrc");
-        const info = await elrcCourseInfo(auth, course_id, record_id, year, semester);
-        const weeks = info.recordingVideoInfoShows ?? [];
-        const chosen =
-          weeks.find((w) => w.week === week) ??
-          weeks.find((w) => (w.recordInfoDetailList ?? []).some((s) => (s.videoInfoList ?? []).length > 0)) ??
-          weeks[0];
+        const sem = semester ? parseSemesterName(semester) : await elrcCurrentSemester(auth);
+        const mine = await elrcMyCourses(auth, sem.name);
+        const course = mine.find((c) => c.courseId === course_id);
+        if (!course) return { content: [{ type: "text" as const, text: `当前学期课程里没有 course_id=${course_id}，请先调用 elrc_courses。` }], isError: true };
 
-        const row = (await elrcListCourses(auth, { year, semester, size: 50 })).find((c) => c.courseId === course_id);
-        const out: Array<{
-          week: string;
-          sessions: Array<{ weekDay: string; weekDate: string | null; section: string | null; clips: Array<{ contentId: string; seat: string | null; asr: string | null }> }>;
-        }> = [];
+        const detail = await elrcCourseDetail(auth, course, sem);
 
-        if (chosen && row?.courseNumber && row.serialNumber) {
-          const sessions = chosen.recordInfoDetailList ?? [];
-          for (const s of sessions) {
-            const videos = s.videoInfoList ?? [];
-            if (videos.length === 0) continue;
-            const scheduleIds = [...new Set(videos.map((v) => v.scheduleId).filter((x): x is string => Boolean(x)))];
-            let clips: Array<{ contentId: string; seat: string | null; asr: string | null }> = [];
-            try {
-              const found = await elrcListClips(auth, {
-                courseNumber: row.courseNumber,
-                serialNumber: row.serialNumber,
-                week: chosen.week,
-                weekDay: s.weekDay,
-                section: s.realSection ?? "",
-                scheduleIds,
-              });
-              clips = found.map((c) => ({ contentId: c.contentId_, seat: c.seat ?? null, asr: c.asr_status ?? null }));
-            } catch {
-              clips = [];
+        const recordings: Array<{ week: string; sessions: Array<{ weekDay: string; weekDate: string | null; section: string | null; clips: Array<{ contentId: string; seat: string | null }> }> }> = [];
+        if (include_recordings && course.serialNumber) {
+          const review = await elrcListCourses(auth, { year: sem.year, semester: sem.name.replace(/^\d{4}-\d{4}学年/, ""), size: 50 }).catch(() => []);
+          const record = review.find((c) => c.serialNumber === course.serialNumber);
+          if (record) {
+            const info = await elrcCourseInfo(auth, record.courseId, record.id, sem.year, sem.name.replace(/^\d{4}-\d{4}学年/, ""));
+            const weeks = info.recordingVideoInfoShows ?? [];
+            const chosen = weeks.find((w) => w.week === week) ?? weeks.find((w) => (w.recordInfoDetailList ?? []).some((x) => (x.videoInfoList ?? []).length)) ?? weeks[0];
+            if (chosen && record.courseNumber && record.serialNumber) {
+              for (const sess of chosen.recordInfoDetailList ?? []) {
+                const videos = sess.videoInfoList ?? [];
+                if (videos.length === 0) continue;
+                const scheduleIds = [...new Set(videos.map((v) => v.scheduleId).filter((x): x is string => Boolean(x)))];
+                const clips = await elrcListClips(auth, {
+                  courseNumber: record.courseNumber,
+                  serialNumber: record.serialNumber,
+                  week: chosen.week,
+                  weekDay: sess.weekDay,
+                  section: sess.realSection ?? "",
+                  scheduleIds,
+                }).catch(() => []);
+                recordings.push({
+                  week: chosen.week,
+                  sessions: [{ weekDay: sess.weekDay, weekDate: sess.weekDate ?? null, section: sess.realSection ?? null, clips: clips.map((c) => ({ contentId: c.contentId_, seat: c.seat ?? null })) }],
+                });
+              }
             }
-            out.push({ week: chosen.week, sessions: [{ weekDay: s.weekDay, weekDate: s.weekDate ?? null, section: s.realSection ?? null, clips }] });
           }
         }
 
         const lines = [
-          `${info.courseName}${row?.serialNumber ? ` (${row.serialNumber})` : ""} | ${(info.teacherList ?? []).map((t) => t.userName).join("/") || "-"}`,
-          `周次：${weeks.map((w) => w.week).join(",")}`,
-          chosen ? `第 ${chosen.week} 周：` : "无录播周次",
-        ];
-        for (const w of out) for (const s of w.sessions) {
-          lines.push(`  ${s.weekDate ?? ""} ${s.weekDay} ${s.section ?? ""}${s.clips.length ? ` → ${s.clips.map((c) => `${c.seat ?? "?"}:${c.contentId}`).join(" | ")}` : "（无切片）"}`);
-        }
+          `${detail.name}${detail.enName ? ` (${detail.enName})` : ""} | ${detail.credits ?? "?"} 学分 / ${detail.classHour ?? "?"} 学时`,
+          detail.timetable.length ? "上课安排：" : "",
+          ...detail.timetable.map((t) => `  ${t.dayOfWeek ? `周${"一二三四五六日"[t.dayOfWeek - 1] ?? t.dayOfWeek}` : ""} ${t.slots ?? ""} | ${t.weeks ?? ""} 周 | ${t.place ?? ""} | ${t.teacher ?? ""}`),
+          detail.platforms.length ? `关联平台：${detail.platforms.map((p) => `${p.platform}${p.courseName ? `(${p.courseName}${p.url ? ` ${p.url}` : ""})` : ""}`).join("、")}` : "",
+          detail.syllabus?.description ? `课程简介：${detail.syllabus.description.slice(0, 200)}` : "",
+          detail.syllabus?.assessment ? `考核方式：${detail.syllabus.assessment.slice(0, 160)}` : "",
+          detail.chapters.length ? `章节：${detail.chapters.map((c) => c.name).join(" / ")}` : "",
+          recordings.length
+            ? `录播（第 ${recordings[0]!.week} 周）：` + recordings.flatMap((r) => r.sessions.map((x) => `${x.weekDate ?? ""} ${x.weekDay} ${x.section ?? ""} → ${x.clips.map((c) => `${c.seat}:${c.contentId}`).join(" | ")}`)).join("；")
+            : include_recordings
+              ? "（未找到录播或本周无切片）"
+              : "",
+        ].filter(Boolean);
+
         return structured(lines.join("\n"), {
-          courseName: info.courseName,
-          teachers: (info.teacherList ?? []).map((t) => t.userName),
-          weeks: out,
+          courseId: course.courseId,
+          name: detail.name,
+          credits: detail.credits,
+          classHour: detail.classHour,
+          syllabus: detail.syllabus
+            ? {
+                description: detail.syllabus.description,
+                objectives: detail.syllabus.objectives,
+                methods: detail.syllabus.methods,
+                schedule: detail.syllabus.schedule,
+                assessment: detail.syllabus.assessment,
+                integrity: detail.syllabus.integrity,
+              }
+            : null,
+          timetable: detail.timetable,
+          platforms: detail.platforms.map((p) => ({
+            platform: p.platform,
+            courseName: p.courseName ?? null,
+            teacher: p.teacher ?? null,
+            status: p.status ?? null,
+            url: p.url ?? null,
+          })),
+          chapters: detail.chapters,
+          recordings,
         });
       } catch (cause) {
         return campusFailure("ELRC 课程详情查询失败", cause);

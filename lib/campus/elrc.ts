@@ -392,3 +392,281 @@ export async function transcript(auth: AuthContext, contentId: string): Promise<
 export function elrcFileUrl(path: string): string {
   return `${ELRC_BASE}${path}`;
 }
+
+
+// ---------------------------------------------------------------- unified platform
+
+const CurrentSemester = z
+  .object({
+    data: z
+      .object({
+        currentSemester: z
+          .object({ name: z.string(), showSemester: z.string().nullable().optional(), semester: z.string().nullable().optional() })
+          .loose()
+          .nullable()
+          .optional(),
+      })
+      .loose(),
+  })
+  .loose();
+
+export interface Semester {
+  /** "2026-2027学年秋季" — the value the course list expects. */
+  name: string;
+  /** "2026-2027" */
+  year: string;
+  /** "1" | "2" | "3" */
+  term: string;
+}
+
+export function parseSemesterName(name: string): Semester {
+  const m = name.match(/(\d{4}-\d{4})学年(秋季|春季|夏季)/);
+  const term = m?.[2] === "春季" ? "2" : m?.[2] === "夏季" ? "3" : "1";
+  return { name, year: m?.[1] ?? "2026-2027", term };
+}
+
+export async function currentSemester(auth: AuthContext): Promise<Semester> {
+  const res = await getJson(auth, "/learn/v1/dropdownbox/semester/manage/current", CurrentSemester);
+  const name = res.data.currentSemester?.name;
+  if (!name) throw new ElrcError("ELRC 未返回当前学期", "parse_drift");
+  return parseSemesterName(name);
+}
+
+const MyCourseRow = z
+  .object({
+    entityData: z
+      .object({
+        contentId_: z.string(),
+        name_: z.string(),
+        name: z.string().nullable().optional(),
+        classTeaching: z.string().nullable().optional(),
+        courseNumber: z.string().nullable().optional(),
+        teacher_names: z.array(z.string()).nullable().optional(),
+        classTime: z.string().nullable().optional(),
+        collegeName: z.array(z.string()).nullable().optional(),
+        course_semester_id: z.union([z.string(), z.number()]).nullable().optional(),
+        semester_teaching_courses: z.string().nullable().optional(),
+      })
+      .loose(),
+  })
+  .loose();
+
+const MyCourses = z
+  .object({
+    data: z
+      .object({ total: z.number().nullable().optional(), results: z.array(MyCourseRow).nullable().optional() })
+      .loose(),
+  })
+  .loose();
+
+export interface MyCourse {
+  courseId: string;
+  name: string;
+  serialNumber: string | null;
+  courseNumber: string | null;
+  teachers: string[];
+  classTime: string | null;
+  colleges: string[];
+  courseSemesterId: string | null;
+  semester: string | null;
+}
+
+export async function myCourses(auth: AuthContext, semesterName: string): Promise<MyCourse[]> {
+  const query = new URLSearchParams({
+    pageIndex: "1",
+    pageSize: "48",
+    courseType: "2",
+    semester: semesterName,
+  });
+  const res = await getJson(auth, `/learn/v1/learningsituation/teaching/course/get/participated/courses/list?${query}`, MyCourses);
+  return (res.data.results ?? []).map((row) => {
+    const e = row.entityData;
+    return {
+      courseId: e.contentId_,
+      name: e.name_ || e.name || "",
+      serialNumber: e.classTeaching ?? null,
+      courseNumber: e.courseNumber ?? null,
+      teachers: e.teacher_names ?? [],
+      classTime: e.classTime ?? null,
+      colleges: e.collegeName ?? [],
+      courseSemesterId: e.course_semester_id != null ? String(e.course_semester_id) : null,
+      semester: e.semester_teaching_courses ?? null,
+    };
+  });
+}
+
+export interface ElrcSyllabus {
+  description: string | null;
+  objectives: string | null;
+  methods: string | null;
+  schedule: string | null;
+  assessment: string | null;
+  integrity: string | null;
+  other: string | null;
+}
+
+export interface ElrcCourseDetail {
+  name: string;
+  enName: string | null;
+  credits: string | null;
+  classHour: string | null;
+  syllabus: ElrcSyllabus | null;
+  /** 关联第三方平台：名称 + 链接。 */
+  platforms: Array<{ platform: string; courseName?: string; teacher?: string; status?: string; url?: string }>;
+  timetable: Array<{ dayOfWeek: number | null; weeks: string | null; slots: string | null; place: string | null; teacher: string | null }>;
+  chapters: Array<{ name: string; children: string[] }>;
+}
+
+const DataSync = z.object({ extend_message: z.record(z.string(), z.unknown()) }).loose();
+
+export async function courseDetail(
+  auth: AuthContext,
+  course: MyCourse,
+  semester: Semester,
+): Promise<ElrcCourseDetail> {
+  if (!course.serialNumber || !course.courseNumber) {
+    throw new ElrcError("课程缺少课程号，无法查询教务详情", "no_course_no");
+  }
+  const base = `/shanghaitechdatasync/datasync/bksCourse/?semester=${encodeURIComponent(semester.year)}&term=${encodeURIComponent(semester.term)}&course_no=${encodeURIComponent(course.serialNumber)}&course_id=${encodeURIComponent(course.courseNumber)}`;
+  const raw = await getJson(auth, base, DataSync);
+  const em = raw.extend_message;
+  const basic = z
+    .object({ course_name: z.string().optional(), course_en_name: z.string().nullable().optional(), credits: z.string().nullable().optional(), class_hour: z.string().nullable().optional() })
+    .loose()
+    .safeParse(em["JwPkKcxxBk_instance"] ?? {});
+  const syl = z
+    .object({
+      course_description: z.string().nullable().optional(),
+      teaching_methods: z.string().nullable().optional(),
+      teaching_objectives: z.string().nullable().optional(),
+      course_content_schedule: z.string().nullable().optional(),
+      assessment_criteria: z.string().nullable().optional(),
+      academic_integrity: z.string().nullable().optional(),
+      other_information: z.string().nullable().optional(),
+    })
+    .loose()
+    .safeParse(em["jxdg_instance"] ?? {});
+
+  const docking = z.object({ platform: z.string().nullable().optional() }).loose().safeParse(em["CourseDocking_instance"] ?? {});
+  const eyun = z
+    .object({
+      course: z
+        .array(
+          z
+            .object({
+              course_name: z.string().nullable().optional(),
+              course_tea: z.string().nullable().optional(),
+              status: z.string().nullable().optional(),
+              course_url: z.string().nullable().optional(),
+            })
+            .loose(),
+        )
+        .nullable()
+        .optional(),
+    })
+    .loose()
+    .safeParse(em["eyun_course"] ?? {});
+
+  const platforms: ElrcCourseDetail["platforms"] = [];
+  if (docking.success && docking.data.platform) platforms.push({ platform: docking.data.platform });
+
+  const eyunCourses = (eyun.success ? eyun.data.course ?? [] : []).map((c) => ({
+    platform: "eCourse",
+    courseName: c.course_name ?? undefined,
+    teacher: c.course_tea?.replace(/,$/, "") ?? undefined,
+    status: c.status ?? undefined,
+    url: c.course_url ?? undefined,
+  }));
+  // eCourse returns every parallel class of the course; keep the student's own
+  // serial number when it matches, otherwise a few representatives.
+  const own = course.serialNumber
+    ? eyunCourses.filter((c) => c.courseName?.includes(course.serialNumber!))
+    : [];
+  platforms.push(...(own.length > 0 ? own : eyunCourses.slice(0, 3)));
+
+  return {
+    name: basic.success ? basic.data.course_name ?? course.name : course.name,
+    enName: basic.success ? basic.data.course_en_name ?? null : null,
+    credits: basic.success ? basic.data.credits ?? null : null,
+    classHour: basic.success ? basic.data.class_hour ?? null : null,
+    syllabus: syl.success
+      ? {
+          description: syl.data.course_description ?? null,
+          objectives: syl.data.teaching_objectives ?? null,
+          methods: syl.data.teaching_methods ?? null,
+          schedule: syl.data.course_content_schedule ?? null,
+          assessment: syl.data.assessment_criteria ?? null,
+          integrity: syl.data.academic_integrity ?? null,
+          other: syl.data.other_information ?? null,
+        }
+      : null,
+    platforms,
+    timetable: await timetable(auth, course, semester),
+    chapters: await chapters(auth, course),
+  };
+}
+
+const TimeTable = z
+  .object({
+    extend_message: z
+      .array(
+        z
+          .object({
+            day_of_week: z.number().nullable().optional(),
+            times: z.string().nullable().optional(),
+            slot_start: z.string().nullable().optional(),
+            slot_stop: z.string().nullable().optional(),
+            area_name: z.string().nullable().optional(),
+            teacher_name: z.string().nullable().optional(),
+          })
+          .loose(),
+      )
+      .nullable()
+      .optional(),
+  })
+  .loose();
+
+async function timetable(auth: AuthContext, course: MyCourse, semester: Semester): Promise<ElrcCourseDetail["timetable"]> {
+  if (!course.serialNumber) return [];
+  const path = `/shanghaitechdatasync/datasync/bksCourseTimeTable/?semester=${encodeURIComponent(semester.year)}&term=${encodeURIComponent(semester.term)}&course_no=${encodeURIComponent(course.serialNumber)}&times=1`;
+  const res = await getJson(auth, path, TimeTable);
+  return (res.extend_message ?? []).map((t) => ({
+    dayOfWeek: t.day_of_week ?? null,
+    weeks: t.times ?? null,
+    slots: t.slot_start && t.slot_stop ? `${t.slot_start}-${t.slot_stop}` : null,
+    place: t.area_name ?? null,
+    teacher: t.teacher_name ?? null,
+  }));
+}
+
+const Chapters = z
+  .object({
+    data: z
+      .array(
+        z
+          .object({
+            info: z.object({ chapter_name: z.string() }).loose(),
+            childInfo: z
+              .array(z.object({ info: z.object({ chapter_name: z.string() }).loose() }).loose())
+              .nullable()
+              .optional(),
+          })
+          .loose(),
+      )
+      .nullable()
+      .optional(),
+  })
+  .loose();
+
+async function chapters(auth: AuthContext, course: MyCourse): Promise<ElrcCourseDetail["chapters"]> {
+  const semester = course.courseSemesterId ?? "1";
+  const res = await getJson(
+    auth,
+    `/learn/v1/homepage/chapter/info?courseId=${encodeURIComponent(course.courseId)}&type=false&semester=${encodeURIComponent(semester)}`,
+    Chapters,
+  );
+  return (res.data ?? []).map((c) => ({
+    name: c.info.chapter_name,
+    children: (c.childInfo ?? []).map((x) => x.info.chapter_name),
+  }));
+}
