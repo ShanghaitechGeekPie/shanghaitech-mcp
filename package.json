@@ -8,7 +8,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "tsc --noEmit",
-    "mcp:inspect": "npx @modelcontextprotocol/inspector --cli --transport http --server-url http://localhost:3000/api/mcp --method tools/list --format json"
+    "mcp:inspect": "npx @modelcontextprotocol/inspector --cli --transport http --server-url http://localhost:3000/api/mcp --method tools/list --format json",
+    "check:surface": "node scripts/check-tool-surface.mjs"
   },
   "engines": {
     "node": ">=20.9"

@@ -42,7 +42,8 @@ Key properties to preserve:
 - **Auth is credential login, not OAuth.** `ids_login` takes IDS username + password, performs the real CAS form login (`GET login page → checkNeedCaptcha → POST login → CASTGC`), and returns an opaque `v1.<iv>.<tag>.<ct>` handle sealed with AES-256-GCM (`MCP_ENC_KEY`). Passwords are used in-request and never persisted. Campus state travels in the handle — no DB, no session store, no memory.
 - **Captcha is part of the contract.** IDS escalates captcha by egress IP. `ids_login` returns an image + encrypted `continuation` instead of retrying; never auto-retry a failed login.
 
-Full layering, platform/sub-app/tool model and migration plan: `docs/ARCHITECTURE.md`. Keep code aligned with it (one module per platform, tools hold schemas, platforms hold parsing).
+Full layering, platform/sub-app/tool model and migration plan: `docs/ARCHITECTURE.md`.
+Tool-surface rules (naming, budgets, schemas, outputs, annotations, error classes) are normative in **`docs/MCP-TOOL-CONVENTIONS.md`** and enforced by `pnpm check:surface`. Read it before adding or renaming a tool. Keep code aligned with it (one module per platform, tools hold schemas, platforms hold parsing).
 
 ## Key Directories
 
@@ -88,6 +89,7 @@ curl -s -X POST http://localhost:3000/api/mcp \
 - **TypeScript strict**, `noUncheckedIndexedAccess`. No `any`; type upstream payloads with interfaces in the platform module. Path alias `@/*` → repo root.
 - **Naming**: files `kebab-case.ts`; exported functions verb-first (`searchCourses`, `getCourseComments`, `validateServiceTicket`); tool names `<platform>_<verb>_<noun>` in `snake_case` (`coursebench_search_courses`).
 - **Tool contract**: `registerTool(name, { title, description, inputSchema: z.object({...}), annotations }, handler)`. Inputs are Zod objects (v2 SDK Standard Schema), always with `.describe()` in Chinese. `annotations.readOnlyHint: true` for read-only tools. Return `{ content: [{ type: "text", text }] }`.
+- **Tool surface is governed** by `docs/MCP-TOOL-CONVENTIONS.md`: names `<platform>_<resource>_<verb>` (2–5 segments), ≤25 tools total / ≤6 per platform, every input field described, writes require a `confirm` gate plus explicit `destructiveHint`, failures return `isError` with the next action, never credentials. Verify with `pnpm check:surface` (needs a running server).
 - **User-facing strings are Chinese** (tool descriptions, error messages, page copy). Code comments and identifiers are English.
 - **Async/errors**: `async` handlers, `AbortSignal.timeout(...)` on every outbound fetch, explicit `res.ok` checks, typed error classes per platform. No silent `catch {}`; convert to a user-visible result or rethrow with context.
 - **Env access** only at module scope or in the function that owns it, always with a default (`process.env.X ?? "https://…"`); secrets never logged, never in tool arguments unless the tool's job is to accept credentials (`ids_login`).
