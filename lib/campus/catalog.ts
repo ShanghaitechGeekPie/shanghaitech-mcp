@@ -27,7 +27,7 @@ export interface CatalogEntry {
   requiresAuth?: boolean;
 }
 
-export type PlatformId = "eams" | "ecourse" | "elearning" | "elrc" | "libspace" | "coursebench" | "egate" | "campus";
+export type PlatformId = "eams" | "ecourse" | "elearning" | "elrc" | "libspace" | "coursebench" | "egate" | "wiki" | "campus";
 
 export const PLATFORM_TITLES: Record<PlatformId, string> = {
   eams: "教务系统 EAMS",
@@ -35,6 +35,7 @@ export const PLATFORM_TITLES: Record<PlatformId, string> = {
   libspace: "图书馆空间预约",
   elearning: "Blackboard（elearning）",
   elrc: "ELRC 在线课堂",
+  wiki: "WikiTech 上科手册",
   coursebench: "CourseBench 课程评价",
   egate: "服务大厅 eGate",
   campus: "校园其他服务",
@@ -443,6 +444,26 @@ export const CATALOG: CatalogEntry[] = [
     url: "https://coursebench.zambar.dev/",
     keywords: ["课程评价", "点评", "打分", "选课参考", "coursebench", "review"],
     tool: "coursebench_search_courses",
+  },
+
+  // ---------------------------------------------------------------- wiki
+  {
+    id: "wiki.search",
+    platform: "wiki",
+    title: "上科手册 · 搜索",
+    description: "WikiTech（wiki.geekpie.club）全校百科检索",
+    url: "https://wiki.geekpie.club/zh/home",
+    keywords: ["wiki", "手册", "百科", "攻略", "vpn", "宿舍", "选课", "生活"],
+    tool: "wiki_search",
+  },
+  {
+    id: "wiki.page",
+    platform: "wiki",
+    title: "上科手册 · 页面正文",
+    description: "按路径读取 Wiki 页面 Markdown",
+    url: "https://wiki.geekpie.club/zh/home",
+    keywords: ["wiki", "文档", "页面", "手册内容"],
+    tool: "wiki_page",
   },
 
   // ---------------------------------------------------------------- campus

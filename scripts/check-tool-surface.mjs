@@ -11,9 +11,9 @@
 const url = process.argv[2] ?? process.env.MCP_URL ?? "http://127.0.0.1:3000/api/mcp";
 const token = process.env.MCP_AUTH_TOKEN;
 
-const PLATFORMS = new Set(["coursebench", "eams", "egate", "libspace", "oa", "elearning", "campus", "ids", "ecourse", "elrc", "print"]);
+const PLATFORMS = new Set(["coursebench", "eams", "egate", "libspace", "oa", "elearning", "campus", "ids", "ecourse", "elrc", "print", "wiki"]);
 const NAME_RE = /^[a-z][a-z0-9]*(_[a-z0-9]+)+$/;
-const TOTAL_BUDGET = 35;
+const TOTAL_BUDGET = 40;
 const PLATFORM_BUDGET = 6;
 
 const errors = [];

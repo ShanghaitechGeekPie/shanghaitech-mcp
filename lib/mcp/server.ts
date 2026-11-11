@@ -30,6 +30,7 @@ import {
   deriveBlackboardSession,
 } from "@/lib/campus/elearning";
 import { downloadUrl } from "@/lib/campus/download";
+import { WikiError, wikiPage, wikiSearch } from "@/lib/campus/wiki";
 import {
   PRINT_BASE,
   PrintError,
@@ -129,7 +130,8 @@ function campusFailure(prefix: string, cause: unknown) {
     cause instanceof EcourseError ||
     cause instanceof ElearningError ||
     cause instanceof ElrcError ||
-    cause instanceof PrintError
+    cause instanceof PrintError ||
+    cause instanceof WikiError
       ? `${cause.message}${nested}`
       : `${err?.message ?? String(cause)}${nested}`;
   return { content: [{ type: "text" as const, text: `${prefix}：${message}` }], isError: true };
@@ -1377,7 +1379,7 @@ export function registerCampusTools(server: McpServer): void {
       inputSchema: z.object({
         query: z.string().min(1).optional().describe("关键词，多个用空格分隔，如「成绩 排名」「图书馆 座位 预约」"),
         platform: z
-          .enum(["eams", "ecourse", "elearning", "elrc", "libspace", "coursebench", "egate", "campus"])
+          .enum(["eams", "ecourse", "elearning", "elrc", "libspace", "coursebench", "egate", "wiki", "campus"])
           .optional()
           .describe("只在该平台内查找"),
         kind: z.enum(["tool", "entry"]).optional().describe("只要工具或只要网页入口"),
@@ -2151,6 +2153,97 @@ export function registerCampusTools(server: McpServer): void {
         );
       } catch (cause) {
         return campusFailure("文印任务查询失败", cause);
+      }
+    },
+  );
+
+  // ---------------------------------------------------------------- wiki
+
+  defineTool(server,
+    "wiki_search",
+    {
+      title: "WikiTech 上科手册 · 搜索",
+      description: "搜索 WikiTech（wiki.geekpie.club，上科手册）：返回页面标题、路径、摘要与建议词。路径可用于 wiki_page 读取正文。",
+      inputSchema: z.object({
+        query: z.string().min(1).describe("关键词，如 VPN、宿舍、选课"),
+        limit: z.number().int().min(1).max(20).default(8).describe("最多返回条数"),
+      }),
+      outputSchema: z.object({
+        totalHits: z.number(),
+        suggestions: z.array(z.string()),
+        results: z.array(
+          z.object({ id: z.string(), title: z.string(), path: z.string(), description: z.string().nullable() }),
+        ),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ query, limit }) => {
+      try {
+        const res = await wikiSearch(query);
+        const results = res.results.slice(0, limit).map((r) => ({
+          id: r.id,
+          title: r.title,
+          path: r.path,
+          description: r.description,
+        }));
+        if (results.length === 0) return structured("没有匹配的页面。", { totalHits: 0, suggestions: res.suggestions, results: [] });
+        return structured(
+          [
+            `共 ${res.totalHits} 条结果：`,
+            ...results.map((r) => `- ${r.title} (path: ${r.path})${r.description ? ` — ${r.description}` : ""}`),
+            res.suggestions.length ? `建议词：${res.suggestions.join(" / ")}` : "",
+          ]
+            .filter(Boolean)
+            .join("\n"),
+          { totalHits: res.totalHits, suggestions: res.suggestions, results },
+        );
+      } catch (cause) {
+        return campusFailure("Wiki 搜索失败", cause);
+      }
+    },
+  );
+
+  defineTool(server,
+    "wiki_page",
+    {
+      title: "WikiTech 上科手册 · 读取页面",
+      description:
+        "按路径读取 Wiki 页面正文（Markdown）。长页面可用 offset/max_chars 分段读取以节省上下文。需要服务端配置 WIKI_API_TOKEN（Wiki.js API Access 的 key，pages:read 权限）。",
+      inputSchema: z.object({
+        path: z.string().min(1).describe("页面路径，如 home、academic、facility/SIST"),
+        locale: z.string().default("zh").describe("语言，默认 zh"),
+        offset: z.number().int().min(0).default(0).describe("从第几个字符开始"),
+        max_chars: z.number().int().min(200).max(20000).default(6000).describe("最多返回字符数"),
+      }),
+      outputSchema: z.object({
+        title: z.string(),
+        path: z.string(),
+        updatedAt: z.string(),
+        content: z.string(),
+        totalChars: z.number(),
+        truncated: z.boolean(),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ path, locale, offset, max_chars }) => {
+      try {
+        const page = await wikiPage(path, locale);
+        if (!page) {
+          return { content: [{ type: "text" as const, text: `Wiki 没有路径为 ${path}（locale=${locale}）的页面。` }], isError: true };
+        }
+        const sliced = page.content.slice(offset, offset + max_chars);
+        const truncated = offset + max_chars < page.content.length;
+        return structured(
+          [
+            `# ${page.title} (${page.path})`,
+            `更新于 ${page.updatedAt}${truncated ? `；正文 ${page.content.length} 字符，显示 ${offset}-${offset + sliced.length}` : ""}`,
+            "",
+            sliced,
+          ].join("\n"),
+          { title: page.title, path: page.path, updatedAt: page.updatedAt, content: sliced, totalChars: page.content.length, truncated },
+        );
+      } catch (cause) {
+        return campusFailure("Wiki 页面读取失败", cause);
       }
     },
   );
