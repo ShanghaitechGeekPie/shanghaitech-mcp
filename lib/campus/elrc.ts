@@ -670,3 +670,78 @@ async function chapters(auth: AuthContext, course: MyCourse): Promise<ElrcCourse
     children: (c.childInfo ?? []).map((x) => x.info.chapter_name),
   }));
 }
+
+
+// ---------------------------------------------------------------- course search (all semesters)
+
+const SearchRow = z
+  .object({
+    contentId_: z.string(),
+    name_: z.string(),
+    classTeaching: z.string().nullable().optional(),
+    teacher_names: z.array(z.string()).nullable().optional(),
+    collegeName: z.array(z.string()).nullable().optional(),
+    semester_show_name: z.string().nullable().optional(),
+    semester_list: z.array(z.string()).nullable().optional(),
+    course_semester_id: z.union([z.string(), z.number()]).nullable().optional(),
+  })
+  .loose();
+
+const CourseData = z.object({
+  page: z.number(),
+  size: z.number(),
+  total: z.number(),
+  results: z.array(SearchRow).nullable().optional(),
+});
+
+export interface CourseSearchResult {
+  total: number;
+  page: number;
+  size: number;
+  courses: MyCourse[];
+}
+
+function courseNumberFrom(serial: string | null | undefined): string | null {
+  if (!serial) return null;
+  return serial.trim().replace(/\s+/g, "").split(".")[0] ?? null;
+}
+
+/**
+ * Full course-center search (`/learn/search?keyword=`), which spans every
+ * semester. The page is server-rendered and embeds the payload as
+ * `var courseData = {...};`, so parse the HTML instead of guessing an API.
+ */
+export async function searchCourses(auth: AuthContext, keyword: string, page = 1): Promise<CourseSearchResult> {
+  const query = new URLSearchParams({ keyword, page: String(page) });
+  const res = await follow(`${ELRC_BASE}/learn/search?${query}`, authOptions(auth, { maxHops: 3, timeoutMs: 25_000 }));
+  if (res.url.includes("ids.shanghaitech.edu.cn")) throw new CampusSessionExpired("ELRC 搜索页被重定向到 IDS，请重新 ids_login");
+  // The payload is embedded as an escaped JSON object:
+  //   var courseData = {\"page\":1,...};
+  const marker = res.text.indexOf("var courseData = ");
+  if (marker < 0) throw new ElrcError(`ELRC 搜索页未包含结果数据（${res.text.length} 字节）`, "parse_drift");
+  const lineEnd = res.text.indexOf("\n", marker);
+  const raw = res.text
+    .slice(marker + "var courseData = ".length, lineEnd > 0 ? lineEnd : undefined)
+    .trim()
+    .replace(/;$/, "")
+    .replace(/\\"/g, '"');
+  const parsed = CourseData.safeParse(JSON.parse(raw));
+  if (!parsed.success) throw new ElrcError(`ELRC 搜索结果结构异常：${parsed.error.message.slice(0, 140)}`, "parse_drift");
+  const data = parsed.data;
+  return {
+    total: data.total,
+    page: data.page,
+    size: data.size,
+    courses: (data.results ?? []).map((r) => ({
+      courseId: r.contentId_,
+      name: r.name_,
+      serialNumber: r.classTeaching?.trim() || null,
+      courseNumber: courseNumberFrom(r.classTeaching),
+      teachers: r.teacher_names ?? [],
+      classTime: null,
+      colleges: r.collegeName ?? [],
+      courseSemesterId: r.course_semester_id != null ? String(r.course_semester_id) : null,
+      semester: r.semester_list?.[0] ?? r.semester_show_name ?? null,
+    })),
+  };
+}

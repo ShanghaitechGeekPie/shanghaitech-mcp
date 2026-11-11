@@ -41,6 +41,7 @@ import {
   myCourses as elrcMyCourses,
   parseSemesterName,
   recordingSummary as elrcRecordingSummary,
+  searchCourses as elrcSearchCourses,
   transcript as elrcTranscript,
 } from "@/lib/campus/elrc";
 import { egateStudent } from "@/lib/campus/egate";
@@ -1595,17 +1596,22 @@ export function registerCampusTools(server: McpServer): void {
   defineTool(server,
     "elrc_courses",
     {
-      title: "ELRC 我的课程（当前学期）",
+      title: "ELRC 课程搜索（全学期）",
       description:
-        "列出当前学期在 ELRC 学习空间注册的课程：课程 id、名称、课程号（如 CS181.01）、教师、上课时间地点，以及是否有录播。course_id 用于 elrc_course。",
+        "搜索 ELRC 课程中心：默认按关键词跨所有学期检索课程（课程名、课程号如 CS181.01、教师、学院、学期），每条带 course_id / course_no / semester，供 elrc_course 继续查大纲与安排。query 留空则浏览全部课程；mine=true 只看自己当前学期的课（含是否有录播）。",
       inputSchema: z.object({
         session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
-        semester: z.string().optional().describe("学期名，如 2026-2027学年秋季；省略用当前学期"),
-        limit: z.number().int().min(1).max(48).default(24).describe("最多返回条数"),
+        query: z.string().optional().describe("课程名/课程号关键词；留空浏览全部"),
+        page: z.number().int().min(1).max(50).default(1).describe("页码（每页 15 条）"),
+        mine: z.boolean().default(false).describe("只看我的课程（当前学期）"),
+        semester: z.string().optional().describe("mine 模式的学期，省略用当前学期"),
+        limit: z.number().int().min(1).max(48).default(15).describe("最多返回条数"),
       }),
       outputSchema: z.object({
-        semester: z.string(),
-        count: z.number(),
+        mode: z.enum(["search", "mine"]),
+        total: z.number(),
+        page: z.number(),
+        semester: z.string().nullable(),
         courses: z.array(
           z.object({
             courseId: z.string(),
@@ -1613,40 +1619,66 @@ export function registerCampusTools(server: McpServer): void {
             serialNumber: z.string().nullable(),
             courseNumber: z.string().nullable(),
             teachers: z.array(z.string()),
-            classTime: z.string().nullable(),
+            semester: z.string().nullable(),
             hasRecording: z.boolean(),
           }),
         ),
       }),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ session, semester, limit }) => {
+    async ({ session, query, page, mine, semester, limit }) => {
       try {
         const auth = await platformAuth(session, "elrc");
-        const sem = semester ? parseSemesterName(semester) : await elrcCurrentSemester(auth);
-        const mine = await elrcMyCourses(auth, sem.name);
-        const recordings = await elrcListCourses(auth, { year: sem.year, semester: sem.name.replace(/^\d{4}-\d{4}学年/, ""), size: 50 }).catch(() => []);
-        const recordingSerials = new Set(recordings.map((c) => c.serialNumber).filter(Boolean));
-        const items = mine.slice(0, limit).map((c) => ({
+        if (mine) {
+          const sem = semester ? parseSemesterName(semester) : await elrcCurrentSemester(auth);
+          const rows = (await elrcMyCourses(auth, sem.name)).slice(0, limit);
+          const recordings = await elrcListCourses(auth, { year: sem.year, semester: sem.name.replace(/^\d{4}-\d{4}学年/, ""), size: 50 }).catch(() => []);
+          const recordingSerials = new Set(recordings.map((c) => c.serialNumber).filter(Boolean));
+          const courses = rows.map((c) => ({
+            courseId: c.courseId,
+            name: c.name,
+            serialNumber: c.serialNumber,
+            courseNumber: c.courseNumber,
+            teachers: c.teachers,
+            semester: c.semester,
+            hasRecording: c.serialNumber ? recordingSerials.has(c.serialNumber) : false,
+          }));
+          return structured(
+            [
+              `${sem.name}：共 ${courses.length} 门课程`,
+              ...courses.map(
+                (c) => `${c.name}${c.serialNumber ? ` (${c.serialNumber})` : ""} | ${c.teachers.join("/") || "-"}${c.hasRecording ? " | 有录播" : ""} | course_id=${c.courseId}`,
+              ),
+            ].join("\n"),
+            { mode: "mine" as const, total: courses.length, page: 1, semester: sem.name, courses },
+          );
+        }
+
+        const result = await elrcSearchCourses(auth, query ?? "", page);
+        const courses = result.courses.slice(0, limit).map((c) => ({
           courseId: c.courseId,
           name: c.name,
           serialNumber: c.serialNumber,
           courseNumber: c.courseNumber,
           teachers: c.teachers,
-          classTime: c.classTime,
-          hasRecording: c.serialNumber ? recordingSerials.has(c.serialNumber) : false,
+          semester: c.semester,
+          hasRecording: false,
         }));
+        if (courses.length === 0) {
+          return structured("没有匹配的课程。", { mode: "search" as const, total: result.total, page, semester: null, courses: [] });
+        }
+        const pages = Math.max(1, Math.ceil(result.total / result.size));
         return structured(
           [
-            `${sem.name}：共 ${items.length} 门课程`,
-            ...items.map(
-              (c) => `${c.name}${c.serialNumber ? ` (${c.serialNumber})` : ""} | ${c.teachers.join("/") || "-"} | ${c.classTime ?? "-"}${c.hasRecording ? " | 有录播" : ""} | course_id=${c.courseId}`,
+            `共 ${result.total} 门课程（第 ${page}/${pages} 页，每页 ${result.size}）：`,
+            ...courses.map(
+              (c) => `${c.name}${c.serialNumber ? ` (${c.serialNumber})` : ""} | ${c.teachers.join("/") || "-"} | ${c.semester ?? "-"} | course_id=${c.courseId}`,
             ),
           ].join("\n"),
-          { semester: sem.name, count: items.length, courses: items },
+          { mode: "search" as const, total: result.total, page, semester: null, courses },
         );
       } catch (cause) {
-        return campusFailure("ELRC 课程列表查询失败", cause);
+        return campusFailure("ELRC 课程搜索失败", cause);
       }
     },
   );
@@ -1656,13 +1688,14 @@ export function registerCampusTools(server: McpServer): void {
     {
       title: "ELRC 课程详情（大纲/安排/平台/章节/回放）",
       description:
-        "读取一门课的完整信息：学分学时、教学大纲（简介/目标/方法/内容安排/考核/诚信）、上课安排（星期/节次/周次/地点）、章节结构、关联第三方平台（Blackboard、eCourse 链接），并可列出录播机位切片（contentId 供 elrc_recording / elrc_transcript / elrc_slides 使用）。",
+        "读取一门课的完整信息：学分学时、教学大纲（简介/目标/方法/内容安排/考核/诚信）、上课安排、章节、关联第三方平台（Blackboard、eCourse 链接），并可列出录播机位切片（contentId 供 elrc_recording / elrc_transcript / elrc_slides 使用）。课程不在自己当前学期列表时，请一并传 course_no 与 semester（来自 elrc_courses 搜索结果）。",
       inputSchema: z.object({
         session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
         course_id: z.string().min(1).describe("elrc_courses 返回的 course_id"),
-        semester: z.string().optional().describe("学期名，省略用当前学期"),
+        course_no: z.string().optional().describe("课程号（如 CS181.01），课程不属于自己时必填"),
+        semester: z.string().optional().describe("学期名（如 2016-2017学年春季），省略用当前学期"),
         include_recordings: z.boolean().default(true).describe("是否附带录播周次与切片"),
-        week: z.string().optional().describe("指定周次（如 \"9\"），省略取第一个有录播的周"),
+        week: z.string().optional().describe("指定周次，省略取第一个有录播的周"),
       }),
       outputSchema: z.object({
         courseId: z.string(),
@@ -1700,18 +1733,35 @@ export function registerCampusTools(server: McpServer): void {
       }),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ session, course_id, semester, include_recordings, week }) => {
+    async ({ session, course_id, course_no, semester, include_recordings, week }) => {
       try {
         const auth = await platformAuth(session, "elrc");
         const sem = semester ? parseSemesterName(semester) : await elrcCurrentSemester(auth);
-        const mine = await elrcMyCourses(auth, sem.name);
-        const course = mine.find((c) => c.courseId === course_id);
-        if (!course) return { content: [{ type: "text" as const, text: `当前学期课程里没有 course_id=${course_id}，请先调用 elrc_courses。` }], isError: true };
+        const mine = await elrcMyCourses(auth, sem.name).catch(() => []);
+        const own = mine.find((c) => c.courseId === course_id);
+
+        const course = own ?? {
+          courseId: course_id,
+          name: course_id,
+          serialNumber: course_no ?? null,
+          courseNumber: course_no ? (course_no.trim().replace(/\s+/g, "").split(".")[0] ?? null) : null,
+          teachers: [],
+          classTime: null,
+          colleges: [],
+          courseSemesterId: null,
+          semester: sem.name,
+        };
+        if (!course.serialNumber || !course.courseNumber) {
+          return {
+            content: [{ type: "text" as const, text: "这门课不在你当前学期的课程里：请传 course_no（如 CS181.01）与 semester（如 2016-2017学年春季）再调用。" }],
+            isError: true,
+          };
+        }
 
         const detail = await elrcCourseDetail(auth, course, sem);
 
         const recordings: Array<{ week: string; sessions: Array<{ weekDay: string; weekDate: string | null; section: string | null; clips: Array<{ contentId: string; seat: string | null }> }> }> = [];
-        if (include_recordings && course.serialNumber) {
+        if (include_recordings && own) {
           const review = await elrcListCourses(auth, { year: sem.year, semester: sem.name.replace(/^\d{4}-\d{4}学年/, ""), size: 50 }).catch(() => []);
           const record = review.find((c) => c.serialNumber === course.serialNumber);
           if (record) {
