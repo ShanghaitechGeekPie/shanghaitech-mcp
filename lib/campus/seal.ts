@@ -45,10 +45,15 @@ export function unseal<T extends object>(token: string): T & SealedPayload {
   const [, ivB64, tagB64, ctB64] = parts;
   if (!ivB64 || !tagB64 || !ctB64) throw new Error("invalid session handle");
 
-  const decipher = createDecipheriv("aes-256-gcm", key(), Buffer.from(ivB64, "base64url"));
-  decipher.setAAD(AAD);
-  decipher.setAuthTag(Buffer.from(tagB64, "base64url"));
-  const plain = Buffer.concat([decipher.update(Buffer.from(ctB64, "base64url")), decipher.final()]).toString("utf8");
+  let plain: string;
+  try {
+    const decipher = createDecipheriv("aes-256-gcm", key(), Buffer.from(ivB64, "base64url"));
+    decipher.setAAD(AAD);
+    decipher.setAuthTag(Buffer.from(tagB64, "base64url"));
+    plain = Buffer.concat([decipher.update(Buffer.from(ctB64, "base64url")), decipher.final()]).toString("utf8");
+  } catch {
+    throw new Error("invalid session handle");
+  }
 
   const parsed = JSON.parse(plain) as T & SealedPayload;
   if (typeof parsed.exp !== "number" || parsed.exp < Date.now()) throw new Error("session handle expired");
