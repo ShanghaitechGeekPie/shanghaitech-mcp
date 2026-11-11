@@ -298,6 +298,10 @@ export function registerCampusTools(server: McpServer): void {
           .url()
           .optional()
           .describe("要换取票据的 service URL，默认 IDS 个人中心；通常不需要改"),
+        lang: z
+          .enum(["zh_CN", "en"])
+          .optional()
+          .describe("登录语言：IDS 会记住该设置，之后 EAMS 页面随之显示中文/英文。省略则沿用账号当前设置"),
       }),
       outputSchema: z.object({
         status: z.enum(["ok", "captcha_required"]),
@@ -307,7 +311,7 @@ export function registerCampusTools(server: McpServer): void {
       }),
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     },
-    async ({ username, password, captcha, continuation, service }) => {
+    async ({ username, password, captcha, continuation, service, lang }) => {
       let jar: CookieJar | undefined;
       if (continuation) {
         try {
@@ -318,7 +322,7 @@ export function registerCampusTools(server: McpServer): void {
       }
 
       try {
-        const outcome = await login({ username, password, captcha, service, jar });
+        const outcome = await login({ username, password, captcha, service, jar, lang });
 
         if (outcome.kind === "captcha_required") {
           const token = seal<CaptchaContinuation>({ cookies: outcome.cookies, service: outcome.service }, CONTINUATION_TTL_MS);

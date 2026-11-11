@@ -142,6 +142,12 @@ export interface LoginInput {
   service?: string;
   /** Cookies from a previous `captcha_required` result. */
   jar?: CookieJar;
+  /**
+   * Locale written to IDS at login. IDS stores it on the account, and EAMS
+   * renders in that language afterwards (verified: english login → EAMS
+   * English, chinese login → EAMS Chinese). Omit to keep the current setting.
+   */
+  lang?: "zh_CN" | "en";
 }
 
 export type LoginOutcome =
@@ -156,9 +162,14 @@ export type LoginOutcome =
 
 const DEFAULT_SERVICE = `${IDS_BASE_URL}/authserver/index.do`;
 
+const LOCALE_COOKIE = "org.springframework.web.servlet.i18n.CookieLocaleResolver.LOCALE";
+
 export async function login(input: LoginInput): Promise<LoginOutcome> {
   const service = input.service ?? DEFAULT_SERVICE;
   const jar: CookieJar = { ...(input.jar ?? {}) };
+  // The login page's own JS writes this cookie before reload; setting it on the
+  // initial GET makes IDS record the locale for this session/account.
+  if (input.lang) jar[LOCALE_COOKIE] = input.lang;
 
   const loginUrl = `${IDS_BASE_URL}${LOGIN_PATH}?service=${encodeURIComponent(service)}`;
   const page = await request(loginUrl, { jar });

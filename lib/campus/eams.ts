@@ -25,6 +25,23 @@ export const EAMS_BASE = (process.env.EAMS_BASE_URL ?? "https://eams.shanghaitec
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Safari/537.36 Chrome/126.0.0.0 Safari/537.36";
 
+const RATE_LIMIT = /Please DO NOT click too quickly|请不要过快点击|不要点击太快/i;
+
+/** EAMS answers rapid repeated hits with a "Please DO NOT click too quickly." page (~4.5KB). */
+export async function eamsFetch(url: string, opts: Parameters<typeof follow>[1], attempts = 4): Promise<ReturnType<typeof follow>> {
+  const backoffMs = [1000, 3000, 6000, 10000];
+  let last: Awaited<ReturnType<typeof follow>> | undefined;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    last = await follow(url, opts);
+    if (!RATE_LIMIT.test(last.text)) return last;
+    await new Promise((r) => setTimeout(r, backoffMs[Math.min(attempt, backoffMs.length - 1)]));
+  }
+  if (last && RATE_LIMIT.test(last.text)) {
+    throw new Error("EAMS 限速：连续返回“Please DO NOT click too quickly”，请降低调用频率后重试");
+  }
+  throw new Error("EAMS 请求失败");
+}
+
 export class CampusSessionExpired extends Error {
   constructor(message = "校园登录态已失效") {
     super(message);
@@ -62,19 +79,15 @@ async function primeEams(auth: AuthContext): Promise<AuthContext> {
  * home→courseTable pair until the page carries the parsers' markers.
  */
 async function fetchEamsTable(auth: AuthContext): Promise<{ auth: AuthContext; text: string }> {
-  let jar = auth.jar ?? {};
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const home = await follow(`${EAMS_BASE}/eams/home.action`, authOptions(cookieAuth(jar), { maxHops: 4 }));
-    assertAlive(home.url, home.text);
-    const table = await follow(`${EAMS_BASE}/eams/courseTableForStd.action`, authOptions(cookieAuth(home.jar), { maxHops: 4 }));
-    assertAlive(table.url, table.text);
-    jar = table.jar;
-    if (/semesterBar\d+/.test(table.text) && /bg\.form\.addInput/.test(table.text)) {
-      return { auth: cookieAuth(jar), text: table.text };
-    }
-    await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+  const home = await eamsFetch(`${EAMS_BASE}/eams/home.action`, authOptions(auth, { maxHops: 4 }));
+  assertAlive(home.url, home.text);
+  await new Promise((r) => setTimeout(r, 350));
+  const table = await eamsFetch(`${EAMS_BASE}/eams/courseTableForStd.action`, authOptions(cookieAuth(home.jar), { maxHops: 4 }));
+  assertAlive(table.url, table.text);
+  if (!/semesterBar\d+/.test(table.text) || !/bg\.form\.addInput/.test(table.text)) {
+    throw new Error(`EAMS 课表页不完整（${table.text.length} 字节，缺 semesterBar/ids；可能是限速页未识别），稍后重试`);
   }
-  throw new Error("EAMS 课表页始终返回空壳（4 次重试），可能需要重新 ids_login");
+  return { auth: cookieAuth(table.jar), text: table.text };
 }
 
 /** Root CASTGC → EAMS session cookies, wrapped as an AuthContext. */
@@ -109,7 +122,7 @@ export async function eamsSemesters(auth: AuthContext): Promise<EamsSemesters> {
   const defaultSemester = table.text.match(/semesterCalendar\(\{[^)]*?value:"(\d+)"/)?.[1] ?? null;
 
   const query = `tagId=semesterBar${mysteryId}Semester&dataType=semesterCalendar&value=6&empty=false`;
-  const res = await follow(
+  const res = await eamsFetch(
     `${EAMS_BASE}/eams/dataQuery.action`,
     authOptions(table.auth, { method: "POST", body: query, maxHops: 2 }),
   );
@@ -133,11 +146,12 @@ export interface EamsProfile {
 
 export async function eamsProfile(auth: AuthContext): Promise<EamsProfile> {
   const primed = await fetchEamsTable(auth);
-  const detail = await follow(`${EAMS_BASE}/eams/stdDetail.action`, authOptions(primed.auth, { maxHops: 4 }));
+  const detail = await eamsFetch(`${EAMS_BASE}/eams/stdDetail.action`, authOptions(primed.auth, { maxHops: 4 }));
   assertAlive(detail.url, detail.text);
 
   // Labels are localised ("姓名：" / "Name："), values live in the next <td>.
-  const studentId = detail.text.match(/Student No[：:]\s*<\/td>\s*<td[^>]*>(\d+)</)?.[1] ?? null;
+  const studentId =
+    detail.text.match(/(?:Student No|学号)[：:]\s*<\/td>\s*<td[^>]*>(\d+)</)?.[1] ?? null;
   const name =
     detail.text.match(/(?:^|>)(?:Name|姓名)[：:]\s*<\/td>\s*<td[^>]*>([^<]{1,40})</)?.[1] ??
     detail.text.match(/id='photoImg'[\s\S]{0,200}?alt="([^"]{1,40})"/)?.[1] ??
@@ -229,7 +243,7 @@ export async function eamsExamBatches(
 ): Promise<{ auth: AuthContext; studentId: string; batches: EamsExamBatch[] }> {
   const { auth: primed, studentId } = await primeAndStudentId(auth);
   const body = `semesterId=${encodeURIComponent(semesterId)}&examBatch.id=&tutorRedirectstudentId=${encodeURIComponent(studentId)}`;
-  const res = await follow(`${EAMS_BASE}/eams/stdExamTable!innerIndex.action`, authOptions(primed, { method: "POST", body, maxHops: 4 }));
+  const res = await eamsFetch(`${EAMS_BASE}/eams/stdExamTable!innerIndex.action`, authOptions(primed, { method: "POST", body, maxHops: 4 }));
   assertAlive(res.url, res.text);
 
   const select = res.text.match(/<select[^>]*id\s*=\s*"examBatchId"[^>]*>[\s\S]*?<\/select>/i)?.[0];
@@ -251,7 +265,7 @@ export async function eamsExams(auth: AuthContext, semesterId: string, batchId?:
   if (!batch) throw new Error("EAMS 考试批次不存在");
 
   const url = `${EAMS_BASE}/eams/stdExamTable!examTable.action?examBatch.id=${encodeURIComponent(batch.id)}&tutorRedirectstudentId=${encodeURIComponent(studentId)}`;
-  const res = await follow(url, authOptions(primed, { maxHops: 4 }));
+  const res = await eamsFetch(url, authOptions(primed, { maxHops: 4 }));
   assertAlive(res.url, res.text);
 
   const { rows } = gridRows(res.text);
