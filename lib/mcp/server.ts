@@ -1,4 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/server";
+import { defineTool } from "@/lib/mcp/registry";
 import { z } from "zod";
 import {
   CourseBenchError,
@@ -8,7 +9,8 @@ import {
   searchCourses,
   type CourseSummary,
 } from "@/lib/campus/coursebench";
-import { CATALOG, PLATFORM_TITLES, searchCatalog, type PlatformId } from "@/lib/campus/catalog";
+import { PLATFORM_TITLES, type PlatformId } from "@/lib/campus/catalog";
+import { findCampus } from "@/lib/mcp/find";
 import { CampusSessionExpired, deriveEamsSession, eamsExams, eamsProfile, eamsSemesters } from "@/lib/campus/eams";
 import {
   EcourseError,
@@ -87,16 +89,6 @@ async function ecourseAuth(session: string) {
   return platformAuth(session, deriveEcourseSession);
 }
 
-function renderCatalogHits(hits: ReturnType<typeof searchCatalog>): string {
-  return hits
-    .map(({ entry }) => {
-      const auth = entry.requiresAuth ? "（需登录）" : "";
-      const tool = entry.tool ? `（已封装工具：${entry.tool}）` : "";
-      return `[${PLATFORM_TITLES[entry.platform]}] ${entry.title}${auth} — ${entry.description}${tool}\n  ${entry.url}`;
-    })
-    .join("\n");
-}
-
 function formatDeadline(iso: string | null | undefined): string {
   if (!iso) return "无截止";
   const d = new Date(iso);
@@ -139,7 +131,7 @@ function failure(cause: unknown) {
  * `createMcpHandler` (the v2 SDK is stateless by construction).
  */
 export function registerCampusTools(server: McpServer): void {
-  server.registerTool(
+  defineTool(server, 
     "coursebench_search_courses",
     {
       title: "搜索课程评价",
@@ -189,7 +181,7 @@ export function registerCampusTools(server: McpServer): void {
     },
   );
 
-  server.registerTool(
+  defineTool(server, 
     "coursebench_course_detail",
     {
       title: "课程详情（含教师分组）",
@@ -252,7 +244,7 @@ export function registerCampusTools(server: McpServer): void {
     },
   );
 
-  server.registerTool(
+  defineTool(server, 
     "coursebench_course_comments",
     {
       title: "课程点评",
@@ -287,7 +279,7 @@ export function registerCampusTools(server: McpServer): void {
     },
   );
 
-  server.registerTool(
+  defineTool(server, 
     "ids_login",
     {
       title: "IDS 登录（用户名 + 密码）",
@@ -381,7 +373,7 @@ export function registerCampusTools(server: McpServer): void {
     },
   );
 
-  server.registerTool(
+  defineTool(server, 
     "ids_status",
     {
       title: "检查 IDS 登录态",
@@ -415,7 +407,7 @@ export function registerCampusTools(server: McpServer): void {
     },
   );
 
-  server.registerTool(
+  defineTool(server, 
     "eams_profile",
     {
       title: "EAMS 身份（验证会话）",
@@ -447,7 +439,7 @@ export function registerCampusTools(server: McpServer): void {
     },
   );
 
-  server.registerTool(
+  defineTool(server, 
     "eams_semesters",
     {
       title: "EAMS 学期列表",
@@ -484,7 +476,7 @@ export function registerCampusTools(server: McpServer): void {
     },
   );
 
-  server.registerTool(
+  defineTool(server, 
     "eams_exams",
     {
       title: "EAMS 考试安排（期中/期末）",
@@ -548,7 +540,7 @@ export function registerCampusTools(server: McpServer): void {
     },
   );
 
-  server.registerTool(
+  defineTool(server, 
     "egate_student",
     {
       title: "eGate 学生信息（第二个平台）",
@@ -579,7 +571,7 @@ export function registerCampusTools(server: McpServer): void {
 
   // ---------------------------------------------------------------- libspace
 
-  server.registerTool(
+  defineTool(server, 
     "libspace_me",
     {
       title: "图书馆空间预约 · 我的账号",
@@ -633,7 +625,7 @@ export function registerCampusTools(server: McpServer): void {
     },
   );
 
-  server.registerTool(
+  defineTool(server, 
     "libspace_spaces",
     {
       title: "图书馆空间 · 按日期查可预约房间",
@@ -736,7 +728,7 @@ export function registerCampusTools(server: McpServer): void {
     },
   );
 
-  server.registerTool(
+  defineTool(server, 
     "libspace_schedule",
     {
       title: "图书馆空间 · 单房间时段",
@@ -770,7 +762,7 @@ export function registerCampusTools(server: McpServer): void {
     },
   );
 
-  server.registerTool(
+  defineTool(server, 
     "libspace_reservations",
     {
       title: "图书馆空间 · 我的预约",
@@ -908,7 +900,7 @@ export function registerCampusTools(server: McpServer): void {
     },
   );
 
-  server.registerTool(
+  defineTool(server, 
     "libspace_reserve",
     {
       title: "图书馆空间 · 创建预约（写）",
@@ -982,7 +974,7 @@ export function registerCampusTools(server: McpServer): void {
     },
   );
 
-  server.registerTool(
+  defineTool(server, 
     "libspace_reservation_action",
     {
       title: "图书馆空间 · 签到/取消/提前结束/延长（写）",
@@ -1017,7 +1009,7 @@ export function registerCampusTools(server: McpServer): void {
 
   // ---------------------------------------------------------------- ecourse
 
-  server.registerTool(
+  defineTool(server, 
     "ecourse_courses",
     {
       title: "eCourse 我的课程",
@@ -1068,7 +1060,7 @@ export function registerCampusTools(server: McpServer): void {
     },
   );
 
-  server.registerTool(
+  defineTool(server, 
     "ecourse_assignments",
     {
       title: "eCourse 作业与截止时间",
@@ -1133,7 +1125,7 @@ export function registerCampusTools(server: McpServer): void {
     },
   );
 
-  server.registerTool(
+  defineTool(server, 
     "ecourse_quizzes",
     {
       title: "eCourse 在线测验",
@@ -1197,7 +1189,7 @@ export function registerCampusTools(server: McpServer): void {
     },
   );
 
-  server.registerTool(
+  defineTool(server, 
     "ecourse_classmates",
     {
       title: "eCourse 同班同学",
@@ -1240,7 +1232,7 @@ export function registerCampusTools(server: McpServer): void {
     },
   );
 
-  server.registerTool(
+  defineTool(server, 
     "ecourse_materials",
     {
       title: "eCourse 课件列表",
@@ -1287,7 +1279,7 @@ export function registerCampusTools(server: McpServer): void {
     },
   );
 
-  server.registerTool(
+  defineTool(server, 
     "ecourse_material_download",
     {
       title: "eCourse 课件下载",
@@ -1349,23 +1341,27 @@ export function registerCampusTools(server: McpServer): void {
 
   // ---------------------------------------------------------------- catalog
 
-  server.registerTool(
+  defineTool(server,
     "campus_find",
     {
-      title: "校园功能查找（统一搜索）",
+      title: "校园功能查找（工具 + 入口）",
       description:
-        "按自然语言查找校园功能入口：课表、成绩、排名、考试、选课、作业、课件、座位、图书馆、邮箱、体育馆…… 返回平台、功能名、入口链接，以及已封装好的 MCP 工具名（有则可直接调用，无需打开网页）。同一诉求会跨平台返回多条（如「考试」同时给出教务排考与 eCourse 在线测验）。不传 query 则列出全部入口，可用 platform 过滤。",
+        "统一查找入口：把自然语言拆成关键词（空格/逗号分隔均可），同时检索**已封装的 MCP 工具**与**各平台网页入口**，按相关度返回。例如「课表」「成绩 排名」「考试」「图书馆 座位」「作业 ddl」「课件 下载」。有对应工具时优先给工具名（可直接调用，无需登录网页）；否则给平台入口链接（需登录的会标注）。可用 platform 限定平台，不传 query 则列出全部。",
       inputSchema: z.object({
-        query: z.string().min(1).optional().describe("想做什么，如「查课表」「成绩排名」「图书馆座位」「作业 DDL」"),
+        query: z.string().min(1).optional().describe("关键词，多个用空格分隔，如「成绩 排名」「图书馆 座位 预约」"),
         platform: z
           .enum(["eams", "ecourse", "libspace", "coursebench", "egate", "campus"])
           .optional()
           .describe("只在该平台内查找"),
+        kind: z.enum(["tool", "entry"]).optional().describe("只要工具或只要网页入口"),
         limit: z.number().int().min(1).max(30).default(10).describe("最多返回条数"),
       }),
       outputSchema: z.object({
         count: z.number(),
-        hits: z.array(
+        tools: z.array(
+          z.object({ name: z.string(), platform: z.string(), title: z.string(), description: z.string() }),
+        ),
+        entries: z.array(
           z.object({
             platform: z.string(),
             title: z.string(),
@@ -1378,62 +1374,49 @@ export function registerCampusTools(server: McpServer): void {
       }),
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    async ({ query, platform, limit }) => {
-      const hits = searchCatalog(query ?? "", platform as PlatformId | undefined, limit);
+    async ({ query, platform, kind, limit }) => {
+      const hits = findCampus({ query, platform: platform as PlatformId | undefined, kind, limit });
       if (hits.length === 0) {
         return text(
           query
-            ? `没找到与「${query}」匹配的校园功能入口。可以试试更宽的说法，例如「成绩」「课表」「图书馆」。`
+            ? `没找到与「${query}」匹配的工具或入口。可以拆成更短的关键词，例如「成绩」「课表」「图书馆」。`
             : "目录为空。",
         );
       }
-      const head = query ? `与「${query}」相关的入口（${hits.length} 条）：` : `共 ${hits.length} 条入口：`;
-      return structured([head, renderCatalogHits(hits)].join("\n"), {
+      const tools = hits.filter((h) => h.kind === "tool");
+      const entries = hits.filter((h) => h.kind === "entry");
+      const lines: string[] = [query ? `与「${query}」相关（${hits.length} 条）：` : `全部（${hits.length} 条）：`];
+      if (tools.length) {
+        lines.push("", "可直接调用的工具：");
+        for (const t of tools) {
+          lines.push(`- ${t.name}（${PLATFORM_TITLES[t.platform as PlatformId] ?? t.platform}）— ${t.description}`);
+        }
+      }
+      if (entries.length) {
+        lines.push("", "网页入口（学生自行打开）：");
+        for (const e of entries) {
+          const auth = e.requiresAuth ? "（需登录）" : "";
+          const wrapped = e.tool ? `（已有工具：${e.tool}）` : "";
+          lines.push(`- [${PLATFORM_TITLES[e.platform as PlatformId] ?? e.platform}] ${e.title}${auth} — ${e.description}${wrapped}\n  ${e.url}`);
+        }
+      }
+      return structured(lines.join("\n"), {
         count: hits.length,
-        hits: hits.map(({ entry }) => ({
-          platform: entry.platform,
-          title: entry.title,
-          description: entry.description,
-          url: entry.url,
-          tool: entry.tool ?? null,
-          requiresAuth: entry.requiresAuth === true,
+        tools: tools.map((t) => ({
+          name: t.name ?? "",
+          platform: t.platform,
+          title: t.title,
+          description: t.description,
+        })),
+        entries: entries.map((e) => ({
+          platform: e.platform,
+          title: e.title,
+          description: e.description,
+          url: e.url ?? "",
+          tool: e.tool ?? null,
+          requiresAuth: e.requiresAuth === true,
         })),
       });
-    },
-  );
-
-  server.registerTool(
-    "eams_menu",
-    {
-      title: "EAMS 功能菜单",
-      description:
-        "列出教务系统（EAMS）的学生端功能入口及链接：学籍、成绩、排名/成绩单、培养方案、课表、选课、考试、教材、教室等。多数功能只给入口，学生自行打开网页操作；带「已封装」标记的可直接用对应 MCP 工具。可选 query 过滤。",
-      inputSchema: z.object({
-        query: z.string().min(1).optional().describe("按关键词过滤，如「成绩」「课表」「证明」"),
-        limit: z.number().int().min(1).max(40).default(40).describe("最多返回条数"),
-      }),
-      outputSchema: z.object({
-        count: z.number(),
-        entries: z.array(
-          z.object({ title: z.string(), description: z.string(), url: z.string(), tool: z.string().nullable() }),
-        ),
-      }),
-      annotations: { readOnlyHint: true, openWorldHint: false },
-    },
-    async ({ query, limit }) => {
-      const hits = query
-        ? searchCatalog(query, "eams", limit)
-        : CATALOG.filter((e) => e.platform === "eams").slice(0, limit).map((entry) => ({ entry, score: 0 }));
-      const entries = hits.map(({ entry }) => ({
-        title: entry.title,
-        description: entry.description,
-        url: entry.url,
-        tool: entry.tool ?? null,
-      }));
-      return structured(
-        [query ? `EAMS 中与「${query}」相关的入口（${entries.length} 条）：` : `EAMS 功能入口（${entries.length} 条）：`, renderCatalogHits(hits)].join("\n"),
-        { count: entries.length, entries },
-      );
     },
   );
 }

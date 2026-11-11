@@ -14,7 +14,7 @@
 | EAMS 身份 / 学期 / 考试排考 | ✅ 工具 `eams_profile`、`eams_semesters`、`eams_exams` |
 | eGate 学生信息 | ✅ 工具 `egate_student` |
 | 图书馆空间预约（libspace） | ✅ 6 个工具：账号 / 查房间 / 查时段 / 我的预约 / 创建 / 签到·取消·提前结束·延长 |
-| 校园功能目录 | ✅ `campus_find`（统一语义搜索）、`eams_menu`（教务功能入口清单） |
+| 校园功能目录 | ✅ `campus_find`（工具 + 网页入口统一检索） |
 | eCourse（TronClass） | ✅ 6 个工具：课程 / 作业与截止 / 在线测验 / 同班同学 / 课件 / 课件下载 |
 | 静态 bearer token 兜底（IDE/CI） | ✅ `MCP_AUTH_TOKEN` |
 
@@ -150,8 +150,9 @@ claude.ai / ChatGPT 这类托管客户端不支持自定义 header，需要等 O
 不是所有校园功能都值得包装成工具。本仓库的取舍：
 
 - **能稳定拿数据的**（课表之外的作业/考试/课件/空间预约）→ 做成工具；
-- **其余一律只做入口**：`campus_find` / `eams_menu` 给出「去哪个链接看、需不需要登录、有没有已封装工具」。例如「成绩排名获取」「电子成绩单」「培养方案」都是 EAMS 里的一个页面，学生自己点进去看即可；
+- **其余一律只做入口**：`campus_find` 给出「去哪个链接看、需不需要登录、有没有已封装工具」。例如「成绩排名获取」「电子成绩单」「培养方案」都是 EAMS 里的一个页面，学生自己点进去看即可；
 - 搜索会**跨平台**返回：问「考试」同时给 EAMS 排考与 eCourse 在线测验；问「座位」同时给 libspace 与图书馆。
+- `campus_find` 的索引是**运行时自动生成**的：每个工具注册时都会登记 name/title/description（`lib/mcp/registry.ts`），所以搜「作业」能直接命中 `ecourse_assignments`，不存在手抄一份元数据的问题；`pnpm check:surface` 会校验「每个工具都能被 find 找到」。
 
 ## 工具面规范
 

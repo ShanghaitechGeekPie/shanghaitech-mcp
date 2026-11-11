@@ -104,6 +104,33 @@ for (const [prefix, count] of perPlatform) {
   if (count > PLATFORM_BUDGET) err(prefix, `${count} tools exceeds per-platform budget ${PLATFORM_BUDGET}`);
 }
 
+// campus_find must index every registered tool (no hand-maintained copy).
+const findNames = await (async () => {
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "campus_find", arguments: { kind: "tool", limit: 30 } },
+      }),
+    });
+    const payload = parseSseOrJson(await res.text());
+    return (payload?.result?.structuredContent?.tools ?? []).map((t) => t.name);
+  } catch {
+    return null;
+  }
+})();
+if (findNames) {
+  const registered = new Set(tools.map((t) => t.name));
+  registered.delete("campus_find"); // the finder must not match itself
+  for (const name of registered) if (!findNames.includes(name)) err(name, "not indexed by campus_find (registry drift)");
+} else {
+  warn("<surface>", "could not query campus_find; tool-index drift unchecked");
+}
+
 const width = 34;
 console.log(`${tools.length} tools from ${url}`);
 for (const [prefix, count] of [...perPlatform].sort()) {
