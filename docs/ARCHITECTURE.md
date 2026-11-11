@@ -114,6 +114,17 @@ export interface Platform {
 ```
 
 ```ts
+// platforms/http.ts —— 平台之间的唯一凭证差异被收在这一层
+export interface AuthContext {
+  headers: Record<string, string>;   // token / authorization 型平台
+  jar?: CookieJar;                   // cookie 型平台
+}
+export const cookieAuth = (jar: CookieJar): AuthContext => ({ headers: {}, jar });
+export const headerAuth = (headers: Record<string, string>): AuthContext => ({ headers });
+export function authOptions(ctx: AuthContext, extra?: FollowOptions): FollowOptions;
+```
+
+```ts
 // session/context.ts
 export interface ToolContext {
   root(handle: string): CookieJar;                 // 解 seal，校验 exp

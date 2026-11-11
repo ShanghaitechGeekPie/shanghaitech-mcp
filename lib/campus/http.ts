@@ -29,6 +29,32 @@ export function cookieHeader(jar: CookieJar): string {
     .join("; ");
 }
 
+/**
+ * Everything a platform session needs to authenticate requests.
+ *
+ * Two shapes exist on campus systems — replayed cookies (EAMS, eGate) and a
+ * bearer-ish header (libspace's `token:`) — but nothing above this layer may
+ * care: tools receive one sealed `session` handle, adapters return one
+ * AuthContext, and `follow()` applies it uniformly.
+ */
+export interface AuthContext {
+  headers: Record<string, string>;
+  jar?: CookieJar;
+}
+
+export function cookieAuth(jar: CookieJar): AuthContext {
+  return { headers: {}, jar };
+}
+
+export function headerAuth(headers: Record<string, string>): AuthContext {
+  return { headers };
+}
+
+/** Fold an AuthContext into `follow()` options. */
+export function authOptions(ctx: AuthContext, extra: FollowOptions = {}): FollowOptions {
+  return { ...extra, jar: ctx.jar, headers: { ...ctx.headers, ...extra.headers } };
+}
+
 export interface FollowOptions {
   jar?: CookieJar;
   method?: "GET" | "POST";

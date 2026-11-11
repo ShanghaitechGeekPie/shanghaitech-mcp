@@ -15,7 +15,7 @@ import {
   createReservation,
   extendOptions,
   listRooms,
-  libspaceToken,
+  libspaceSession,
   me as libspaceMe,
   reservationAction,
   reservation as libspaceReservation,
@@ -59,9 +59,12 @@ function courseLine(c: CourseSummary): string {
   ].join(" | ");
 }
 
-async function libspaceTokenFrom(session: string): Promise<string> {
-  const { cookies } = unseal<IdsSessionToken>(session);
-  return libspaceToken(cookies);
+/** One sealed handle in, one platform AuthContext out — tools never see the credential shape. */
+async function platformAuth<T extends object>(
+  session: string,
+  derive: (root: CookieJar) => Promise<T>,
+): Promise<T> {
+  return derive(unseal<IdsSessionToken>(session).cookies);
 }
 
 function campusFailure(prefix: string, cause: unknown) {
@@ -388,7 +391,7 @@ export function registerCampusTools(server: McpServer): void {
     },
     async ({ session }) => {
       try {
-        const profile = await libspaceMe(await libspaceTokenFrom(session));
+        const profile = await libspaceMe(await platformAuth(session, libspaceSession));
         const violations = (profile.violationCountList ?? [])
           .map((v) => {
             const type = typeof v.reservationType === "string" ? v.reservationType : "?";
@@ -432,14 +435,14 @@ export function registerCampusTools(server: McpServer): void {
     },
     async ({ session, date, type, floor, limit }) => {
       try {
-        const token = await libspaceTokenFrom(session);
-        const rooms = (await listRooms(token, { date, type, pageSize: 100 })).filter(
+        const auth = await platformAuth(session, libspaceSession);
+        const rooms = (await listRooms(auth, { date, type, pageSize: 100 })).filter(
           (r) => floor === undefined || r.floorNo === floor,
         );
         if (rooms.length === 0) return text(`${date} 没有符合条件的房间。`);
 
         const header = type
-          ? await spaceConfig(token, type)
+          ? await spaceConfig(auth, type)
               .then(
                 (c) =>
                   `${type} 开放 ${c.openStartTime}-${c.openEndTime}，单次 ${c.minDurationHours}-${c.maxDurationHours} 小时，可预约未来 ${c.cycleDays} 天`,
@@ -480,7 +483,7 @@ export function registerCampusTools(server: McpServer): void {
     },
     async ({ session, space_id, date }) => {
       try {
-        const detail = await libspaceSchedule(await libspaceTokenFrom(session), space_id, date);
+        const detail = await libspaceSchedule(await platformAuth(session, libspaceSession), space_id, date);
         return text(`${detail.date} 空间 #${detail.spaceId}：\n${groupSlots(detail.slots)}`);
       } catch (cause) {
         return campusFailure("libspace 时段查询失败", cause);
@@ -509,10 +512,10 @@ export function registerCampusTools(server: McpServer): void {
     },
     async ({ session, reservation_id, tab, space_type, room_name, status, date_start, date_end, limit }) => {
       try {
-        const token = await libspaceTokenFrom(session);
+        const auth = await platformAuth(session, libspaceSession);
         if (reservation_id) {
-          const detail = await libspaceReservation(token, reservation_id);
-          const options = await extendOptions(token, reservation_id, detail.endTime).catch(() => null);
+          const detail = await libspaceReservation(auth, reservation_id);
+          const options = await extendOptions(auth, reservation_id, detail.endTime).catch(() => null);
           const lines = [
             `#${detail.reservationId} ${detail.spaceName} | ${detail.reserveDate} ${detail.startTime}-${detail.endTime}`,
             `状态：${detail.reservationStatusStr ?? detail.reservationStatus}${detail.signInWindow ? "（当前可签到）" : ""}${
@@ -529,7 +532,7 @@ export function registerCampusTools(server: McpServer): void {
           return text(lines.filter(Boolean).join("\n"));
         }
 
-        const page = await libspaceReservations(token, {
+        const page = await libspaceReservations(auth, {
           tab,
           pageNo: 1,
           pageSize: limit,
@@ -575,8 +578,8 @@ export function registerCampusTools(server: McpServer): void {
     },
     async ({ session, space_id, space_type, date, start_time, end_time, title, meeting_type, inviter_keywords, confirm }) => {
       try {
-        const token = await libspaceTokenFrom(session);
-        const [detail, config] = await Promise.all([libspaceSchedule(token, space_id, date), spaceConfig(token, space_type)]);
+        const auth = await platformAuth(session, libspaceSession);
+        const [detail, config] = await Promise.all([libspaceSchedule(auth, space_id, date), spaceConfig(auth, space_type)]);
 
         const wants = detail.slots.filter((s) => s.time >= start_time && s.time < end_time);
         const blocked = wants.filter((s) => s.statusCode !== "AVAILABLE");
@@ -595,7 +598,7 @@ export function registerCampusTools(server: McpServer): void {
 
         const inviters: Array<{ inviterName: string; inviterNo: string }> = [];
         for (const keyword of inviter_keywords ?? []) {
-          const found = await searchUsers(token, keyword);
+          const found = await searchUsers(auth, keyword);
           const exact = found.find((u) => u.userName === keyword) ?? found[0];
           if (!exact) problems.push(`找不到参与人「${keyword}」`);
           else inviters.push({ inviterName: exact.userName, inviterNo: exact.userNo });
@@ -610,7 +613,7 @@ export function registerCampusTools(server: McpServer): void {
         if (problems.length > 0) return { content: [{ type: "text" as const, text: summary.join("\n") }], isError: true };
         if (!confirm) return text([...summary, "未提交。确认无误后带 confirm: true 重新调用。"].join("\n"));
 
-        const receipt = await createReservation(token, {
+        const receipt = await createReservation(auth, {
           spaceId: space_id,
           spaceType: space_type,
           dates: [date],
@@ -651,7 +654,8 @@ export function registerCampusTools(server: McpServer): void {
         return text(`将对预约 #${reservation_id} 执行：${label}。确认后带 confirm: true 重新调用。`);
       }
       try {
-        const receipt = await reservationAction(await libspaceTokenFrom(session), reservation_id, action, { hours });
+        const auth = await platformAuth(session, libspaceSession);
+        const receipt = await reservationAction(auth, reservation_id, action, { hours });
         return text(`已执行${label}，平台回执：${receipt}`);
       } catch (cause) {
         return campusFailure(`libspace ${label}失败`, cause);

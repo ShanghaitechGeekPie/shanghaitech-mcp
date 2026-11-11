@@ -1,4 +1,4 @@
-import { follow, type CookieJar } from "./http";
+import { authOptions, cookieAuth, follow, type AuthContext, type CookieJar } from "./http";
 
 /**
  * EAMS (教务系统) adapter.
@@ -39,17 +39,17 @@ function assertAlive(url: string, text: string): void {
   }
 }
 
-export async function deriveEamsSession(root: CookieJar): Promise<CookieJar> {
-  const entry = await follow(`${EAMS_BASE}/eams/courseTableForStd.action`, {
-    jar: root,
-    maxHops: 8,
-    headers: { "user-agent": UA },
-  });
+/** Root CASTGC → EAMS session cookies, wrapped as an AuthContext. */
+export async function deriveEamsSession(root: CookieJar): Promise<AuthContext> {
+  const entry = await follow(
+    `${EAMS_BASE}/eams/courseTableForStd.action`,
+    authOptions(cookieAuth(root), { maxHops: 8, headers: { "user-agent": UA } }),
+  );
   assertAlive(entry.url, entry.text);
 
-  const primed = await follow(`${EAMS_BASE}/eams/home.action`, { jar: entry.jar, maxHops: 4 });
+  const primed = await follow(`${EAMS_BASE}/eams/home.action`, authOptions(cookieAuth(entry.jar), { maxHops: 4 }));
   assertAlive(primed.url, primed.text);
-  return primed.jar;
+  return cookieAuth(primed.jar);
 }
 
 export interface EamsSemester {
@@ -63,8 +63,8 @@ export interface EamsSemesters {
   semesters: EamsSemester[];
 }
 
-export async function eamsSemesters(cookies: CookieJar): Promise<EamsSemesters> {
-  const table = await follow(`${EAMS_BASE}/eams/courseTableForStd.action`, { jar: cookies, maxHops: 4 });
+export async function eamsSemesters(auth: AuthContext): Promise<EamsSemesters> {
+  const table = await follow(`${EAMS_BASE}/eams/courseTableForStd.action`, authOptions(auth, { maxHops: 4 }));
   assertAlive(table.url, table.text);
 
   // EAMS embeds a per-session "mystery id" that keys the semester dropdown.
@@ -72,12 +72,10 @@ export async function eamsSemesters(cookies: CookieJar): Promise<EamsSemesters> 
   const defaultSemester = table.text.match(/\{empty:"false",value:"(\d+)"},"searchTable\(\)"\);/)?.[1] ?? null;
 
   const query = `tagId=semesterBar${mysteryId}Semester&dataType=semesterCalendar&value=6&empty=false`;
-  const res = await follow(`${EAMS_BASE}/eams/dataQuery.action`, {
-    jar: table.jar,
-    method: "POST",
-    body: query,
-    maxHops: 2,
-  });
+  const res = await follow(
+    `${EAMS_BASE}/eams/dataQuery.action`,
+    authOptions(cookieAuth(table.jar), { method: "POST", body: query, maxHops: 2 }),
+  );
   assertAlive(res.url, res.text);
 
   const semesters: EamsSemester[] = [];
@@ -96,8 +94,8 @@ export interface EamsProfile {
   name: string | null;
 }
 
-export async function eamsProfile(cookies: CookieJar): Promise<EamsProfile> {
-  const detail = await follow(`${EAMS_BASE}/eams/stdDetail.action`, { jar: cookies, maxHops: 4 });
+export async function eamsProfile(auth: AuthContext): Promise<EamsProfile> {
+  const detail = await follow(`${EAMS_BASE}/eams/stdDetail.action`, authOptions(auth, { maxHops: 4 }));
   assertAlive(detail.url, detail.text);
 
   // Labels are localised ("姓名：" / "Name："), values live in the next <td>.

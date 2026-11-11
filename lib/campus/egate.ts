@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { follow, type CookieJar } from "./http";
+import { authOptions, cookieAuth, follow, type AuthContext, type CookieJar } from "./http";
 import { CampusSessionExpired } from "./eams";
 
 /**
@@ -39,21 +39,21 @@ function assertAlive(url: string, text: string): void {
   }
 }
 
-export async function deriveEgateSession(root: CookieJar): Promise<CookieJar> {
-  const entry = await follow(SIGN_MESSAGE_URL, { jar: root, maxHops: 8 });
+export async function deriveEgateSession(root: CookieJar): Promise<AuthContext> {
+  const entry = await follow(SIGN_MESSAGE_URL, authOptions(cookieAuth(root), { maxHops: 8 }));
   assertAlive(entry.url, entry.text);
   if (!entry.jar.MOD_AUTH_CAS) {
     throw new CampusSessionExpired("egate-app 未下发 MOD_AUTH_CAS cookie（CASTGC 无效？）");
   }
-  return entry.jar;
+  return cookieAuth(entry.jar);
 }
 
 /** The app-config preflight is side-effect-free and keeps MOD_AUTH_CAS/_WEU current. */
-export async function egateStudent(cookies: CookieJar): Promise<{ studentId: string | null }> {
-  const primed = await follow(`${APP_CONFIG_URL}?v=${Date.now()}`, { jar: cookies, maxHops: 4 });
+export async function egateStudent(auth: AuthContext): Promise<{ studentId: string | null }> {
+  const primed = await follow(`${APP_CONFIG_URL}?v=${Date.now()}`, authOptions(auth, { maxHops: 4 }));
   assertAlive(primed.url, primed.text);
 
-  const res = await follow(STUDENT_INFO_URL, { jar: primed.jar, method: "POST", body: "", maxHops: 4 });
+  const res = await follow(STUDENT_INFO_URL, authOptions(cookieAuth(primed.jar), { method: "POST", body: "", maxHops: 4 }));
   assertAlive(res.url, res.text);
 
   let parsed;

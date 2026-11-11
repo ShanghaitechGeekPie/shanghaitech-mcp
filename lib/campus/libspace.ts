@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { follow, type CookieJar } from "./http";
+import { authOptions, cookieAuth, follow, headerAuth, type AuthContext, type CookieJar } from "./http";
 import { CampusSessionExpired } from "./eams";
 
 /**
@@ -41,9 +41,9 @@ export class LibspaceError extends Error {
   }
 }
 
-/** CASTGC → libspace access token. Throws CampusSessionExpired when IDS rejects the TGC. */
-export async function libspaceToken(root: CookieJar): Promise<string> {
-  const login = await follow(`${LIBSPACE_BASE}/login`, { jar: root, maxHops: 12 });
+/** CASTGC → libspace `token:` header, wrapped as an AuthContext. */
+export async function libspaceSession(root: CookieJar): Promise<AuthContext> {
+  const login = await follow(`${LIBSPACE_BASE}/login`, authOptions(cookieAuth(root), { maxHops: 12 }));
   const landing = new URL(login.url);
   if (landing.hostname !== "libspace.shanghaitech.edu.cn") {
     throw new CampusSessionExpired("libspace 登录被重定向到非预期域名：" + landing.hostname);
@@ -52,21 +52,21 @@ export async function libspaceToken(root: CookieJar): Promise<string> {
   const state = landing.searchParams.get("state");
   if (!code || !state) throw new CampusSessionExpired("libspace 未返回 OAuth code（CASTGC 可能已失效）");
 
-  const cb = await follow(`${LIBSPACE_BASE}/callBack?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`, {
-    jar: login.jar,
-    maxHops: 2,
-  });
+  const cb = await follow(
+    `${LIBSPACE_BASE}/callBack?code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`,
+    authOptions(cookieAuth(login.jar), { maxHops: 2 }),
+  );
   const parsed = Envelope.parse(JSON.parse(cb.text));
   if (String(parsed.code) === "40101") throw new CampusSessionExpired("libspace 拒绝签发 token，请重新 ids_login");
   if (String(parsed.code) !== "0") throw new LibspaceError(parsed.msg ?? "callBack 失败", String(parsed.code));
 
   const token = z.object({ access_token: z.string().min(8) }).safeParse(parsed.data);
   if (!token.success) throw new LibspaceError("callBack 返回缺少 access_token", "bad_payload");
-  return token.data.access_token;
+  return headerAuth({ token: token.data.access_token });
 }
 
 async function api<T>(
-  token: string,
+  auth: AuthContext,
   path: string,
   schema: z.ZodType<T>,
   opts: { method?: "GET" | "POST"; query?: Record<string, string | number | undefined>; body?: unknown } = {},
@@ -75,12 +75,15 @@ async function api<T>(
   for (const [k, v] of Object.entries(opts.query ?? {})) {
     if (v !== undefined && v !== "") url.searchParams.set(k, String(v));
   }
-  const res = await follow(url.toString(), {
-    method: opts.method ?? "GET",
-    body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
-    headers: { token, "content-type": "application/json" },
-    maxHops: 2,
-  });
+  const res = await follow(
+    url.toString(),
+    authOptions(auth, {
+      method: opts.method ?? "GET",
+      body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+      headers: { "content-type": "application/json" },
+      maxHops: 2,
+    }),
+  );
 
   let envelope;
   try {
@@ -171,11 +174,11 @@ export interface RoomQuery {
 }
 
 /** Room list for a date. Without `type`, all three types are queried and merged. */
-export async function listRooms(token: string, q: RoomQuery): Promise<Room[]> {
+export async function listRooms(auth: AuthContext, q: RoomQuery): Promise<Room[]> {
   const types: SpaceType[] = q.type ? [q.type] : [...SPACE_TYPES];
   const pages = await Promise.all(
     types.map((type) =>
-      api(token, "/spaces", RoomPage, {
+      api(auth, "/spaces", RoomPage, {
         query: { date: q.date, type, pageNo: q.pageNo ?? 1, pageSize: q.pageSize ?? 50 },
       }),
     ),
@@ -183,26 +186,26 @@ export async function listRooms(token: string, q: RoomQuery): Promise<Room[]> {
   return pages.flatMap((p) => p.list);
 }
 
-export function openScope(token: string) {
-  return api(token, "/spaces/open-scope", z.array(z.object({ spaceType: z.string(), openScope: z.string() }).loose()));
+export function openScope(auth: AuthContext) {
+  return api(auth, "/spaces/open-scope", z.array(z.object({ spaceType: z.string(), openScope: z.string() }).loose()));
 }
 
-export function spaceConfig(token: string, spaceType: SpaceType) {
-  return api(token, "/spaces/space-config", SpaceConfig.loose(), { query: { spaceType } });
+export function spaceConfig(auth: AuthContext, spaceType: SpaceType) {
+  return api(auth, "/spaces/space-config", SpaceConfig.loose(), { query: { spaceType } });
 }
 
-export function floors(token: string, spaceType: SpaceType) {
-  return api(token, "/spaces/floorList", z.array(z.object({ floorNo: z.number() }).loose()), { query: { spaceType } });
+export function floors(auth: AuthContext, spaceType: SpaceType) {
+  return api(auth, "/spaces/floorList", z.array(z.object({ floorNo: z.number() }).loose()), { query: { spaceType } });
 }
 
-export function schedule(token: string, spaceId: number, date: string) {
-  return api(token, `/spaces/${spaceId}/schedule`, z.object({ spaceId: z.number(), date: z.string(), slots: z.array(Slot) }).loose(), {
+export function schedule(auth: AuthContext, spaceId: number, date: string) {
+  return api(auth, `/spaces/${spaceId}/schedule`, z.object({ spaceId: z.number(), date: z.string(), slots: z.array(Slot) }).loose(), {
     query: { date },
   });
 }
 
-export function me(token: string) {
-  return api(token, "/me", Profile);
+export function me(auth: AuthContext) {
+  return api(auth, "/me", Profile);
 }
 
 export interface ReservationQuery {
@@ -216,7 +219,7 @@ export interface ReservationQuery {
   dateEnd?: string;
 }
 
-export function reservations(token: string, q: ReservationQuery = {}) {
+export function reservations(auth: AuthContext, q: ReservationQuery = {}) {
   const body = {
     tab: q.tab ?? "current",
     pageNo: q.pageNo ?? 1,
@@ -226,15 +229,15 @@ export function reservations(token: string, q: ReservationQuery = {}) {
     ...(q.statusCode ? { statusCode: q.statusCode } : {}),
     ...(q.dateStart && q.dateEnd ? { dateStart: q.dateStart, dateEnd: q.dateEnd } : {}),
   };
-  return api(token, "/my/reservations/list", ReservationPage, { method: "POST", body });
+  return api(auth, "/my/reservations/list", ReservationPage, { method: "POST", body });
 }
 
-export function reservation(token: string, reservationId: number) {
-  return api(token, `/my/reservations/${reservationId}`, Reservation);
+export function reservation(auth: AuthContext, reservationId: number) {
+  return api(auth, `/my/reservations/${reservationId}`, Reservation);
 }
 
-export function extendOptions(token: string, reservationId: number, endTime?: string) {
-  return api(token, `/my/reservations/${reservationId}/extend-options`, ExtendOptions, {
+export function extendOptions(auth: AuthContext, reservationId: number, endTime?: string) {
+  return api(auth, `/my/reservations/${reservationId}/extend-options`, ExtendOptions, {
     query: endTime ? { endTime } : undefined,
   });
 }
@@ -252,8 +255,8 @@ export interface CreateReservation {
 }
 
 /** Write: returns the raw envelope so callers see the platform's own receipt. */
-export async function createReservation(token: string, input: CreateReservation) {
-  const res = await follow(`${LIBSPACE_BASE}/reservations`, {
+export async function createReservation(auth: AuthContext, input: CreateReservation) {
+  const res = await follow(`${LIBSPACE_BASE}/reservations`, authOptions(auth, {
     method: "POST",
     body: JSON.stringify({
       spaceId: input.spaceId,
@@ -266,16 +269,16 @@ export async function createReservation(token: string, input: CreateReservation)
       title: input.title ?? "",
       inviterList: input.inviterList ?? [],
     }),
-    headers: { token, "content-type": "application/json" },
+    headers: { "content-type": "application/json" },
     maxHops: 2,
-  });
+  }));
   return res.text;
 }
 
 export type ReservationAction = "cancel" | "sign-in" | "end-early" | "extend";
 
 export async function reservationAction(
-  token: string,
+  auth: AuthContext,
   reservationId: number,
   action: ReservationAction,
   payload?: { hours?: number },
@@ -286,18 +289,16 @@ export async function reservationAction(
       : action === "end-early"
         ? JSON.stringify({ reservationId })
         : "";
-  const res = await follow(`${LIBSPACE_BASE}/my/reservations/${reservationId}/${action}`, {
-    method: "POST",
-    body,
-    headers: { token, "content-type": "application/json" },
-    maxHops: 2,
-  });
+  const res = await follow(
+    `${LIBSPACE_BASE}/my/reservations/${reservationId}/${action}`,
+    authOptions(auth, { method: "POST", body, headers: { "content-type": "application/json" }, maxHops: 2 }),
+  );
   return res.text;
 }
 
-export function searchUsers(token: string, nameKeyWords: string) {
+export function searchUsers(auth: AuthContext, nameKeyWords: string) {
   return api(
-    token,
+    auth,
     "/reservations/queryUsers",
     z.array(z.object({ userName: z.string(), userNo: z.string(), userDept: z.string().nullable().optional() }).loose()),
     { query: { nameKeyWords } },
