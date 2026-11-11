@@ -11,10 +11,10 @@
 | IDS 用户名+密码登录（`ids_login`，换 12 小时 session 句柄） | ✅ 可用（含验证码两段式） |
 | IDS 票据校验 / service ticket 换取 | ✅ `lib/campus/ids.ts`、`lib/campus/ids-auth.ts` |
 | 一个 CASTGC 换多平台会话（EAMS / eGate） | ✅ `lib/campus/{http,eams,egate}.ts` |
-| EAMS 身份 / 学期列表 | ✅ 工具 `eams_profile`、`eams_semesters` |
+| EAMS 身份 / 学期 / 考试排考 | ✅ 工具 `eams_profile`、`eams_semesters`、`eams_exams` |
 | eGate 学生信息 | ✅ 工具 `egate_student` |
 | 图书馆空间预约（libspace） | ✅ 6 个工具：账号 / 查房间 / 查时段 / 我的预约 / 创建 / 签到·取消·提前结束·延长 |
-| eCourse（TronClass） | ✅ 6 个工具：课程 / 作业与截止 / 考试 / 同班同学 / 课件 / 课件下载 |
+| eCourse（TronClass） | ✅ 6 个工具：课程 / 作业与截止 / 在线测验 / 同班同学 / 课件 / 课件下载 |
 | 静态 bearer token 兜底（IDE/CI） | ✅ `MCP_AUTH_TOKEN` |
 
 ## 为什么是 Next.js + Vercel

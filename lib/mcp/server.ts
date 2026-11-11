@@ -8,7 +8,7 @@ import {
   searchCourses,
   type CourseSummary,
 } from "@/lib/campus/coursebench";
-import { CampusSessionExpired, deriveEamsSession, eamsProfile, eamsSemesters } from "@/lib/campus/eams";
+import { CampusSessionExpired, deriveEamsSession, eamsExams, eamsProfile, eamsSemesters } from "@/lib/campus/eams";
 import {
   EcourseError,
   deriveEcourseSession,
@@ -465,6 +465,70 @@ export function registerCampusTools(server: McpServer): void {
       } catch (cause) {
         const message = cause instanceof CampusSessionExpired ? cause.message : (cause as Error).message;
         return { content: [{ type: "text" as const, text: `EAMS 查询失败：${message}` }], isError: true };
+      }
+    },
+  );
+
+  server.registerTool(
+    "eams_exams",
+    {
+      title: "EAMS 考试安排（期中/期末）",
+      description:
+        "从教务系统（EAMS）读取考试批次与排考表：课程、考试类型（期中考试/期末考试）、日期、时间、地点、状态。semester_id 省略时用默认学期；批次省略时用页面默认选中的批次。",
+      inputSchema: z.object({
+        session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
+        semester_id: z.string().optional().describe("学期 id（eams_semesters 返回）；省略用默认学期"),
+        batch_id: z.string().optional().describe("考试批次 id；省略用默认批次（通常即“期末考试”）"),
+      }),
+      outputSchema: z.object({
+        semesterId: z.string(),
+        batch: z.object({ id: z.string(), name: z.string() }),
+        count: z.number(),
+        exams: z.array(
+          z.object({
+            courseCode: z.string(),
+            courseName: z.string(),
+            examType: z.string(),
+            examDate: z.string(),
+            examTimeRange: z.string(),
+            examPlace: z.string(),
+            examStatus: z.string(),
+            remark: z.string(),
+          }),
+        ),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ session, semester_id, batch_id }) => {
+      try {
+        const auth = await deriveEamsSession(unseal<IdsSessionToken>(session).cookies);
+        const semesterId = semester_id ?? (await eamsSemesters(auth)).defaultSemester;
+        if (!semesterId) return { content: [{ type: "text" as const, text: "EAMS 未返回默认学期，请显式传 semester_id。" }], isError: true };
+        const { batch, exams } = await eamsExams(auth, semesterId, batch_id);
+        if (exams.length === 0) return text(`${batch.name}：暂无排考记录。`);
+        const lines = exams.map(
+          (e) =>
+            `${e.courseCode} ${e.courseName} | ${e.examType} | ${e.examDate} ${e.examTimeRange} | ${e.examPlace} | ${e.examStatus}${
+              e.remark ? ` | ${e.remark}` : ""
+            }`,
+        );
+        return structured([`学期 ${semesterId} · ${batch.name} · 共 ${exams.length} 场：`, ...lines].join("\n"), {
+          semesterId,
+          batch: { id: batch.id, name: batch.name },
+          count: exams.length,
+          exams: exams.map((e) => ({
+            courseCode: e.courseCode,
+            courseName: e.courseName,
+            examType: e.examType,
+            examDate: e.examDate,
+            examTimeRange: e.examTimeRange,
+            examPlace: e.examPlace,
+            examStatus: e.examStatus,
+            remark: e.remark,
+          })),
+        });
+      } catch (cause) {
+        return campusFailure("EAMS 考试查询失败", cause);
       }
     },
   );
@@ -1055,10 +1119,11 @@ export function registerCampusTools(server: McpServer): void {
   );
 
   server.registerTool(
-    "ecourse_exams",
+    "ecourse_quizzes",
     {
-      title: "eCourse 考试",
-      description: "汇总考试安排（含开始/结束时间）与标题。省略 course_id 时遍历我的课程。",
+      title: "eCourse 在线测验",
+      description:
+        "列出 eCourse（TronClass）里以“考试/测验”形式发布的在线测验及其开放时间。注意：这是课程内的线上测验，不是教务排考；期中/期末考试请用 eams_exams。",
       inputSchema: z.object({
         session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
         course_id: z.number().int().positive().optional().describe("只看这门课"),
@@ -1101,10 +1166,10 @@ export function registerCampusTools(server: McpServer): void {
           .sort((a, b) => (a.startAt ?? "9999").localeCompare(b.startAt ?? "9999"))
           .slice(0, limit);
 
-        if (items.length === 0) return text("没有考试安排。");
+        if (items.length === 0) return text("没有在线测验。");
         return structured(
           [
-            `共 ${items.length} 场考试：`,
+            `共 ${items.length} 个在线测验：`,
             ...items.map(
               (e) => `[${e.courseName}] ${e.title} | ${formatDeadline(e.startAt)} → ${formatDeadline(e.endAt)} | #${e.examId}`,
             ),

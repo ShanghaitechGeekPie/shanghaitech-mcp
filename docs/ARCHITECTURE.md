@@ -257,11 +257,11 @@ campus_link({ session, target: "ecourse" }) → { url, expires_in }
 | 平台 | 协议族 | 认证 | 会话证据 | 工具 |
 |---|---|---|---|---|
 | CourseBench | public-rest | 无 | — | `coursebench_*` ✅ |
-| EAMS | spring-action | CASTGC | `stdDetail` 姓名 + 学号 | `eams_profile`、`eams_semesters` ✅；课表/考试/成绩 ⬜ |
+| EAMS | spring-action | CASTGC | `stdDetail` 姓名 + 学号 | `eams_profile`、`eams_semesters`、`eams_exams` ✅；课表/成绩 ⬜ |
 | eGate | wisedu-xsfw | CASTGC | `MOD_AUTH_CAS` + `hqdlxsjpcxx.XSBH` | `egate_student` ✅；活动签到/服务大厅 ⬜ |
 | OA 体育馆 | weaver | CASTGC | `shkjdx_session` | ⬜（查询 → 预约，写操作） |
 | elearning | blackboard | CASTGC + 二次表单 | `session_id` | ⬜（日程/作业） |
 | libspace | oauth2-code → bearer | CASTGC（换 OAuth code） | `access_token` + `/me` | `libspace_*` ✅（含写操作） |
-| eCourse | keycloak-broker | CASTGC（CAS broker） | `session=V2-…` + `KEYCLOAK_*` | `ecourse_*` ✅（课程/作业/考试/同学/课件/下载） |
+| eCourse | keycloak-broker | CASTGC（CAS broker） | `session=V2-…` + `KEYCLOAK_*` | `ecourse_*` ✅（课程/作业/在线测验/同学/课件/下载） |
 | eCourse | keycloak-broker | CASTGC（浏览器） | 无服务端流程 | ⬜（深链 / `campus_link`） |
 | 图书馆 / 邮件 / OJ | 自有账号 | 非 IDS | — | 明确标 unsupported，不承诺 SSO |
