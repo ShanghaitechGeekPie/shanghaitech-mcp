@@ -35,6 +35,7 @@ Key properties to preserve:
 - **One module per upstream platform** under `lib/campus/`, exposing typed functions plus a typed error class (`CourseBenchError`, `CampusSessionExpired`). Tool code only formats; it does not `fetch` upstream APIs directly.
 - **Platform session pattern**: never hardcode a CAS `service=`. Request the platform's own entry URL with the CASTGC in the jar and let the site 302 to IDS itself; follow every hop with `follow()` from `lib/campus/http.ts` so each `Set-Cookie` is captured. Success = final URL is not on `ids.shanghaitech.edu.cn` and the body lacks `统一身份认证`.
 - **Every platform needs its priming call** before data endpoints: EAMS `/eams/home.action`, eGate `/xsfw/sys/funauthapp/api/getAppConfig/xshdapp-4770201649822494.do?v=<ts>`. Without it the first data call returns an uninitialized shell.
+- **Two credential shapes exist.** Cookie platforms (EAMS/eGate) derive a jar via the CAS bounce; token platforms (libspace) run `login → IDS oauth2.0/authorize → /callBack` and then send `token: <AT-…>` on every request. Both start from the same sealed `session` handle.
 - **Consumed tickets are single-use**: never retry a hop that carried `ticket=ST-…`; re-derive the whole platform session instead.
 - **Page language is account state, not a request header.** EAMS renders in whatever language the account picked on the IDS login page (`org.springframework.web.servlet.i18n.CookieLocaleResolver.LOCALE` written by the page's own JS, then stored IDS-side). Replaying that cookie against `eams.shanghaitech.edu.cn` does **not** switch the page (verified: `zh_CN` and `en` both returned Chinese). Therefore every HTML parser must accept both labels (`姓名|Name`, `Student No`) and fail loudly — never return both-fields-null.
 - **Failures are data.** Upstream errors are converted into MCP tool results with `isError: true` and a readable Chinese message; they never throw out of the handler.
@@ -56,6 +57,7 @@ Full layering, platform/sub-app/tool model and migration plan: `docs/ARCHITECTUR
 | `lib/campus/seal.ts` | AES-256-GCM sealing of session handles (`seal`/`unseal`, 12 h TTL enforced on open). |
 | `lib/campus/http.ts` | Shared cookie jar + `follow()` (manual redirects, per-hop `Set-Cookie`). |
 | `lib/campus/eams.ts`, `egate.ts` | Platform adapters ported from `/home/zambar/repos/shanghaitech-cpdaily-auth` (TechPie backend). |
+| `lib/campus/libspace.ts` | Library-space booking. Different credential shape: IDS **OAuth2 code** → `access_token`, sent as header `token:` (not `Authorization: Bearer`). Derived per call; no cookie session. |
 | `scripts/smoke-mcp.sh` | initialize + tools/list against a running endpoint. |
 
 ## Development Commands

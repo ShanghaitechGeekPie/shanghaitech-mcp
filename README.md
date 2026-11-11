@@ -13,6 +13,7 @@
 | 一个 CASTGC 换多平台会话（EAMS / eGate） | ✅ `lib/campus/{http,eams,egate}.ts` |
 | EAMS 身份 / 学期列表 | ✅ 工具 `eams_profile`、`eams_semesters` |
 | eGate 学生信息 | ✅ 工具 `egate_student` |
+| 图书馆空间预约（libspace） | ✅ 6 个工具：账号 / 查房间 / 查时段 / 我的预约 / 创建 / 签到·取消·提前结束·延长 |
 | 静态 bearer token 兜底（IDE/CI） | ✅ `MCP_AUTH_TOKEN` |
 
 ## 为什么是 Next.js + Vercel
@@ -63,7 +64,19 @@ CASTGC ──GET <平台入口 URL>──▶ 302 ids…/authserver/login?service
 - **每个平台都有「预热」**：EAMS 要先 `home.action`，否则 `courseTableForStd.action` 只回一个空壳；eGate 要先打 `getAppConfig/xshdapp-…do`，否则 `MOD_AUTH_CAS` 不刷新。
 - **失效判定**：最终 URL 落在 `ids…` 或正文出现「统一身份认证」就是会话死了，重新 `ids_login`，不要盲目重试（消费过的 ticket 重放必失败）。
 
-已实现：EAMS（身份 + 学期列表）、eGate（学生信息）。参考实现是 `shanghaitech-cpdaily-auth`（TechPie 后端），逐行对照移植。
+已实现：EAMS（身份 + 学期列表）、eGate（学生信息）、libspace（图书馆空间预约全套）。
+
+libspace 是第三种会话形态，验证了体系的可扩展性：它是 **IDS OAuth2 授权码**而不是 cookie 会话——
+
+```
+GET /spaceReservationApp/api/login            → 302 IDS oauth2.0/authorize（client_id 已注册）
+    → 302 ids…/authserver/login?service=…     （CASTGC 有效则直接过）
+    → 302 libspace…/login?code=…&state=…
+GET /spaceReservationApp/api/callBack?code&state → {"access_token":"AT-…","expires_in":28800}
+此后每个请求带 header：token: <AT-…>        （不是 Authorization: Bearer）
+```
+
+所以平台层只需要多一种「凭证类型」（token 而非 cookie），`ids_login` 的 session 句柄、seal、错误分类全部复用。参考实现是 `shanghaitech-cpdaily-auth`（TechPie 后端），EAMS/eGate 逐行对照移植；libspace 为实测逆向（前端 bundle + 抓包）。
 
 ## 本地开发
 

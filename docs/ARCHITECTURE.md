@@ -250,5 +250,6 @@ campus_link({ session, target: "ecourse" }) → { url, expires_in }
 | eGate | wisedu-xsfw | CASTGC | `MOD_AUTH_CAS` + `hqdlxsjpcxx.XSBH` | `egate_student` ✅；活动签到/服务大厅 ⬜ |
 | OA 体育馆 | weaver | CASTGC | `shkjdx_session` | ⬜（查询 → 预约，写操作） |
 | elearning | blackboard | CASTGC + 二次表单 | `session_id` | ⬜（日程/作业） |
+| libspace | oauth2-code → bearer | CASTGC（换 OAuth code） | `access_token` + `/me` | `libspace_*` ✅（含写操作） |
 | eCourse | keycloak-broker | CASTGC（浏览器） | 无服务端流程 | ⬜（深链 / `campus_link`） |
 | 图书馆 / 邮件 / OJ | 自有账号 | 非 IDS | — | 明确标 unsupported，不承诺 SSO |
