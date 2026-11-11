@@ -5,6 +5,7 @@ import { deriveEamsSession } from "./eams";
 import { deriveEgateSession } from "./egate";
 import { deriveBlackboardSession } from "./elearning";
 import { deriveElrcSession } from "./elrc";
+import { PrintError } from "./print";
 import { type AuthContext, type CookieJar } from "./http";
 import { libspaceSession } from "./libspace";
 import { seal, unseal } from "./seal";
@@ -31,7 +32,7 @@ import { CampusSessionExpired } from "./eams";
 export const ROOT_TTL_SEC = 12 * 60 * 60;
 export const DERIVED_TTL_SEC = 30 * 60;
 
-export type PlatformKey = "eams" | "egate" | "ecourse" | "libspace" | "elearning" | "elrc";
+export type PlatformKey = "eams" | "egate" | "ecourse" | "libspace" | "elearning" | "elrc" | "print";
 
 const DERIVERS: Record<PlatformKey, (root: CookieJar) => Promise<AuthContext>> = {
   eams: deriveEamsSession,
@@ -40,6 +41,11 @@ const DERIVERS: Record<PlatformKey, (root: CookieJar) => Promise<AuthContext>> =
   libspace: libspaceSession,
   elearning: deriveBlackboardSession,
   elrc: deriveElrcSession,
+  // The print platform is not CAS-derived: its token is obtained at ids_login
+  // time with the same username/password, so losing it means logging in again.
+  print: async () => {
+    throw new PrintError("文印系统会话已过期，请重新 ids_login（密码不留存，无法自动续期）", "session_expired");
+  },
 };
 
 export interface RootSession {
@@ -131,8 +137,8 @@ export async function getRoot(sid: string): Promise<RootSession | null> {
   return raw ? openValue<RootSession>(raw) : null;
 }
 
-export async function putDerived(sid: string, platform: PlatformKey, auth: AuthContext): Promise<void> {
-  await setRaw(derivedKey(sid, platform), sealedValue(auth, DERIVED_TTL_SEC), DERIVED_TTL_SEC);
+export async function putDerived(sid: string, platform: PlatformKey, auth: AuthContext, ttlSec = DERIVED_TTL_SEC): Promise<void> {
+  await setRaw(derivedKey(sid, platform), sealedValue(auth, ttlSec), ttlSec);
 }
 
 export async function getDerived(sid: string, platform: PlatformKey): Promise<AuthContext | null> {

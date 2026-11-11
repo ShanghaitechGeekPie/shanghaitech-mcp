@@ -31,6 +31,14 @@ import {
 } from "@/lib/campus/elearning";
 import { downloadUrl } from "@/lib/campus/download";
 import {
+  PRINT_BASE,
+  PrintError,
+  printDelete,
+  printLogin,
+  printTasks,
+  printUpload,
+} from "@/lib/campus/print";
+import {
   ElrcError,
   courseInfo as elrcCourseInfo,
   ELRC_BASE,
@@ -65,6 +73,7 @@ import { seal, unseal } from "@/lib/campus/seal";
 import {
   newSessionId,
   platformAuth,
+  putDerived,
   putRoot,
   sessionHandle,
   sessionInfo,
@@ -119,7 +128,8 @@ function campusFailure(prefix: string, cause: unknown) {
     cause instanceof LibspaceError ||
     cause instanceof EcourseError ||
     cause instanceof ElearningError ||
-    cause instanceof ElrcError
+    cause instanceof ElrcError ||
+    cause instanceof PrintError
       ? `${cause.message}${nested}`
       : `${err?.message ?? String(cause)}${nested}`;
   return { content: [{ type: "text" as const, text: `${prefix}：${message}` }], isError: true };
@@ -373,6 +383,20 @@ export function registerCampusTools(server: McpServer): void {
         const sid = newSessionId();
         await putRoot(sid, { userId: outcome.userId, cookies: outcome.cookies });
         const session = sessionHandle(sid);
+
+        // The print platform has its own accounts (same username/password, no
+        // CAS); log in once here so print tools work without a second login.
+        let printNote = "";
+        try {
+          const print = await printLogin(username, password);
+          const ttl = print.expiresAt
+            ? Math.max(60, Math.min(7 * 24 * 3600, Math.floor((print.expiresAt - Date.now()) / 1000)))
+            : 7 * 24 * 3600;
+          await putDerived(sid, "print", { headers: { "x-token": print.token } }, ttl);
+          printNote = `文印系统：已登录（token 至 ${print.expiresAt ? new Date(print.expiresAt).toISOString().slice(0, 10) : "7 天后"}）`;
+        } catch (cause) {
+          printNote = `文印系统：登录失败（${(cause as Error).message}）`;
+        }
         const cookies = Object.keys(outcome.cookies).sort().join(", ");
         return {
           content: [
@@ -381,7 +405,7 @@ export function registerCampusTools(server: McpServer): void {
               text:
                 `登录成功：${outcome.userId}\n` +
                 `session（ticket 12 小时，派生会话 30 分钟自动续签）：\n${session}\n` +
-                `已获得的 cookie：${cookies}`,
+                `已获得的 cookie：${cookies}\n${printNote}`,
             },
           ],
           structuredContent: { status: "ok", userId: outcome.userId, session },
@@ -1999,4 +2023,135 @@ export function registerCampusTools(server: McpServer): void {
     },
   );
 
+  // ---------------------------------------------------------------- print
+
+  defineTool(server,
+    "print_upload",
+    {
+      title: "文印系统 · 上传文档",
+      description:
+        "（写操作）把文件上传到校园文印平台并拿到取件码（printCode）。两种方式：传 file_base64（≤700KB，字节经本服务转发）；不传则返回**直连上传参数**，由客户端自己在校园网内 POST（字节完全不经过本服务）。",
+      inputSchema: z.object({
+        session: z.string().min(1).describe("ids_login 返回的 session 句柄（登录时已顺带建立文印会话）"),
+        file_base64: z.string().optional().describe("文件内容 base64；省略则返回直连上传参数"),
+        confirm: z.boolean().default(false).describe("true 才真正上传（会占用文印队列）"),
+        filename: z.string().optional().describe("文件名（默认 document.pdf）"),
+        mime: z.string().optional().describe("MIME 类型（默认 application/pdf）"),
+      }),
+      outputSchema: z.object({
+        mode: z.enum(["relayed", "direct"]),
+        uuid: z.string().optional(),
+        printCode: z.string().optional(),
+        endpoint: z.string().optional(),
+        headers: z.record(z.string(), z.string()).optional(),
+        field: z.string().optional(),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+    },
+    async ({ session, file_base64, filename, mime, confirm }) => {
+      try {
+        const auth = await platformAuth(session, "print");
+        const token = auth.headers["x-token"];
+        if (!token) return { content: [{ type: "text" as const, text: "文印会话缺少 token，请重新 ids_login。" }], isError: true };
+
+        if (!confirm) {
+          return structured(
+            `将上传 ${filename ?? "document.pdf"} 到文印系统${file_base64 ? `（${Math.round(Buffer.from(file_base64, "base64").length / 1024)}KB，经本服务转发）` : "（返回直连上传参数）"}。确认后带 confirm: true 重新调用。`,
+            { mode: file_base64 ? ("relayed" as const) : ("direct" as const) },
+          );
+        }
+
+        if (!file_base64) {
+          const endpoint = `${PRINT_BASE}/v1/task/pending/uploadPrintFile?source=web`;
+          return structured(
+            [
+              "直连上传（客户端需在校园网内，字节不经过本服务）：",
+              `POST ${endpoint}`,
+              `header  x-token: ${token}`,
+              "multipart 字段名：file",
+              "",
+              "curl 示例：",
+              `curl -H "x-token: ${token}" -F "file=@/path/to.pdf;type=application/pdf" "${endpoint}"`,
+              "",
+              "返回 {code:0,data:{uuid,printCode}}；拿到后可用 print_tasks 查看/删除。",
+            ].join("\n"),
+            { mode: "direct" as const, endpoint, headers: { "x-token": token }, field: "file" },
+          );
+        }
+
+        const bytes = Buffer.from(file_base64, "base64");
+        if (bytes.length > 700_000) {
+          return { content: [{ type: "text" as const, text: `文件 ${(bytes.length / 1024).toFixed(0)}KB 超过内联上限 700KB，请改用直连上传（不传 file_base64）。` }], isError: true };
+        }
+        const up = await printUpload(token, new Uint8Array(bytes), filename ?? "document.pdf", mime ?? "application/pdf");
+        return structured(`上传成功：${filename ?? "document.pdf"}\n取件码：${up.printCode}\nuuid：${up.uuid}`, {
+          mode: "relayed" as const,
+          uuid: up.uuid,
+          printCode: up.printCode,
+        });
+      } catch (cause) {
+        return campusFailure("文印上传失败", cause);
+      }
+    },
+  );
+
+  defineTool(server,
+    "print_tasks",
+    {
+      title: "文印系统 · 待输出作业",
+      description: "（写操作）列出或删除文印平台里的待输出作业（含文件名、取件码、状态）。删除需要 action=delete + uuids + confirm。",
+      inputSchema: z.object({
+        session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
+        action: z.enum(["list", "delete"]).default("list").describe("list=列出，delete=删除"),
+        kind: z.enum(["print", "scan"]).default("print").describe("print=打印作业，scan=扫描文档"),
+        page: z.number().int().min(1).max(20).default(1).describe("页码"),
+        size: z.number().int().min(1).max(50).default(20).describe("每页条数"),
+        uuids: z.array(z.string()).optional().describe("delete 时的任务 uuid 列表"),
+        confirm: z.boolean().default(false).describe("delete 时必须为 true；list 忽略"),
+      }),
+      outputSchema: z.object({
+        action: z.string(),
+        count: z.number(),
+        tasks: z.array(
+          z.object({
+            uuid: z.string(),
+            name: z.string(),
+            printCode: z.string().nullable(),
+            status: z.number().nullable(),
+            createdAt: z.string().nullable(),
+          }),
+        ),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+    },
+    async ({ session, action, kind, page, size, uuids, confirm }) => {
+      try {
+        const token = (await platformAuth(session, "print")).headers["x-token"];
+        if (!token) return { content: [{ type: "text" as const, text: "文印会话缺少 token，请重新 ids_login。" }], isError: true };
+
+        if (action === "delete") {
+          if (!confirm) {
+            return structured(`将删除 ${uuids?.length ?? 0} 个文印任务。确认后带 confirm: true 重新调用。`, { action: "delete", count: 0, tasks: [] });
+          }
+          if (!uuids || uuids.length === 0) {
+            return { content: [{ type: "text" as const, text: "删除需要提供 uuids（先用 action=list 查询）。" }], isError: true };
+          }
+          await printDelete(token, uuids);
+          return structured(`已删除 ${uuids.length} 个任务。`, { action: "delete", count: 0, tasks: [] });
+        }
+
+        const tasks = await printTasks(token, page, size, kind);
+        if (tasks.length === 0) return structured("暂无待输出作业。", { action: "list", count: 0, tasks: [] });
+        return structured(
+          [
+            `共 ${tasks.length} 条待输出作业：`,
+            ...tasks.map((t) => `- ${t.name} | 取件码 ${t.printCode ?? "-"} | 状态 ${t.status ?? "-"} | ${t.createdAt ?? ""} | ${t.uuid}`),
+          ].join("\n"),
+          { action: "list", count: tasks.length, tasks },
+        );
+      } catch (cause) {
+        return campusFailure("文印任务查询失败", cause);
+      }
+    },
+  );
 }
