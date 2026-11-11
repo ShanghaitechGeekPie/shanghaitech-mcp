@@ -46,6 +46,11 @@ function text(value: string) {
   return { content: [{ type: "text" as const, text: value }] };
 }
 
+/** Text summary for humans + machine-checkable payload for the client. */
+function structured<T extends Record<string, unknown>>(summary: string, data: T) {
+  return { content: [{ type: "text" as const, text: summary }], structuredContent: data };
+}
+
 function courseLine(c: CourseSummary): string {
   const avg = averageScore(c.score ?? []);
   return [
@@ -77,15 +82,20 @@ function campusFailure(prefix: string, cause: unknown) {
   return { content: [{ type: "text" as const, text: `${prefix}：${message}` }], isError: true };
 }
 
-function groupSlots(slots: Array<{ time: string; statusCode: string }>): string {
-  const merged: Array<{ start: string; end: string; code: string }> = [];
+const SLOT_LABEL: Record<string, string> = { AVAILABLE: "空闲", OCCUPIED: "已占用", CLOSED: "未开放" };
+
+function mergeSegments(slots: Array<{ time: string; statusCode: string }>): Array<{ start: string; end: string; statusCode: string }> {
+  const merged: Array<{ start: string; end: string; statusCode: string }> = [];
   for (const slot of slots) {
     const last = merged[merged.length - 1];
-    if (last && last.code === slot.statusCode) last.end = slot.time;
-    else merged.push({ start: slot.time, end: slot.time, code: slot.statusCode });
+    if (last && last.statusCode === slot.statusCode) last.end = slot.time;
+    else merged.push({ start: slot.time, end: slot.time, statusCode: slot.statusCode });
   }
-  const label: Record<string, string> = { AVAILABLE: "空闲", OCCUPIED: "已占用", CLOSED: "未开放" };
-  return merged.map((m) => `${m.start}-${m.end} ${label[m.code] ?? m.code}`).join("；");
+  return merged;
+}
+
+function formatSegments(segments: Array<{ start: string; end: string; statusCode: string }>): string {
+  return segments.map((m) => `${m.start}-${m.end} ${SLOT_LABEL[m.statusCode] ?? m.statusCode}`).join("；");
 }
 
 function failure(cause: unknown) {
@@ -110,14 +120,38 @@ export function registerCampusTools(server: McpServer): void {
         min_score: z.number().min(0).max(5).optional().describe("最低均分（0-5）"),
         limit: z.number().int().min(1).max(50).default(20).describe("最多返回条数"),
       }),
+      outputSchema: z.object({
+        count: z.number(),
+        courses: z.array(
+          z.object({
+            id: z.number(),
+            name: z.string(),
+            code: z.string(),
+            institute: z.string(),
+            credit: z.number(),
+            avgScore: z.number().nullable(),
+            commentNum: z.number(),
+          }),
+        ),
+      }),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ query, institute, min_score, limit }) => {
       try {
         const courses = await searchCourses({ query, institute, minScore: min_score, limit });
         if (courses.length === 0) return text("没有匹配的课程。");
-        const header = `找到 ${courses.length} 门课程：`;
-        return text([header, ...courses.map(courseLine)].join("\n"));
+        return structured([`找到 ${courses.length} 门课程：`, ...courses.map(courseLine)].join("\n"), {
+          count: courses.length,
+          courses: courses.map((c) => ({
+            id: c.id,
+            name: c.name,
+            code: c.code ?? "",
+            institute: c.institute ?? "",
+            credit: c.credit,
+            avgScore: averageScore(c.score ?? []),
+            commentNum: c.comment_num,
+          })),
+        });
       } catch (cause) {
         return failure(cause);
       }
@@ -132,6 +166,25 @@ export function registerCampusTools(server: McpServer): void {
       inputSchema: z.object({
         course_id: z.number().int().positive().describe("coursebench_search_courses 返回的课程 id"),
       }),
+      outputSchema: z.object({
+        course: z.object({
+          id: z.number(),
+          name: z.string(),
+          code: z.string(),
+          institute: z.string(),
+          credit: z.number(),
+          avgScore: z.number().nullable(),
+          commentNum: z.number(),
+        }),
+        groups: z.array(
+          z.object({
+            id: z.number(),
+            teachers: z.array(z.object({ id: z.number(), name: z.string() })),
+            avgScore: z.number().nullable(),
+            commentNum: z.number(),
+          }),
+        ),
+      }),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ course_id }) => {
@@ -145,7 +198,23 @@ export function registerCampusTools(server: McpServer): void {
             `  分组 ${group.id}: 教师 ${teachers} | ${avg === null ? "暂无评分" : `均分 ${avg.toFixed(2)}`} | ${group.comment_num} 条点评`,
           );
         }
-        return text(lines.join("\n"));
+        return structured(lines.join("\n"), {
+          course: {
+            id: course.id,
+            name: course.name,
+            code: course.code ?? "",
+            institute: course.institute ?? "",
+            credit: course.credit,
+            avgScore: averageScore(course.score ?? []),
+            commentNum: course.comment_num,
+          },
+          groups: (course.groups ?? []).map((g) => ({
+            id: g.id,
+            teachers: (g.teachers ?? []).map((t) => ({ id: t.id, name: t.name })),
+            avgScore: averageScore(g.score ?? []),
+            commentNum: g.comment_num,
+          })),
+        });
       } catch (cause) {
         return failure(cause);
       }
@@ -161,6 +230,10 @@ export function registerCampusTools(server: McpServer): void {
         course_id: z.number().int().positive().describe("课程 id"),
         limit: z.number().int().min(1).max(20).default(5).describe("最多返回条数"),
       }),
+      outputSchema: z.object({
+        count: z.number(),
+        comments: z.array(z.object({ id: z.number(), title: z.string(), content: z.string() })),
+      }),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ course_id, limit }) => {
@@ -173,7 +246,10 @@ export function registerCampusTools(server: McpServer): void {
             return `${i + 1}. ${c.title}\n${content}`;
           })
           .join("\n\n");
-        return text(body);
+        return structured(body, {
+          count: comments.length,
+          comments: comments.map((c) => ({ id: c.id, title: c.title, content: c.content })),
+        });
       } catch (cause) {
         return failure(cause);
       }
@@ -203,6 +279,12 @@ export function registerCampusTools(server: McpServer): void {
           .optional()
           .describe("要换取票据的 service URL，默认 IDS 个人中心；通常不需要改"),
       }),
+      outputSchema: z.object({
+        status: z.enum(["ok", "captcha_required"]),
+        userId: z.string().optional(),
+        session: z.string().optional(),
+        continuation: z.string().optional(),
+      }),
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
     },
     async ({ username, password, captcha, continuation, service }) => {
@@ -230,6 +312,7 @@ export function registerCampusTools(server: McpServer): void {
                   `continuation=${token}`,
               },
             ],
+            structuredContent: { status: "captcha_required", continuation: token },
           };
         }
 
@@ -255,6 +338,7 @@ export function registerCampusTools(server: McpServer): void {
                 `已获得的 cookie：${cookies}`,
             },
           ],
+          structuredContent: { status: "ok", userId: outcome.userId, session },
         };
       } catch (cause) {
         return { content: [{ type: "text" as const, text: `IDS 登录异常：${(cause as Error).message}` }], isError: true };
@@ -270,6 +354,11 @@ export function registerCampusTools(server: McpServer): void {
       inputSchema: z.object({
         session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
       }),
+      outputSchema: z.object({
+        userId: z.string(),
+        expiresAt: z.string(),
+        alive: z.boolean(),
+      }),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ session }) => {
@@ -282,10 +371,11 @@ export function registerCampusTools(server: McpServer): void {
       const probe = "https://ids.shanghaitech.edu.cn/authserver/index.do";
       const ticket = await mintServiceTicket(token.cookies, probe);
       const expires = new Date(token.exp).toISOString();
-      return text(
+      return structured(
         ticket
           ? `有效：${token.userId}，句柄 ${expires} 到期；已成功换取 service ticket。`
           : `已失效：${token.userId}，请重新 ids_login。`,
+        { userId: token.userId, expiresAt: expires, alive: Boolean(ticket) },
       );
     },
   );
@@ -299,6 +389,7 @@ export function registerCampusTools(server: McpServer): void {
       inputSchema: z.object({
         session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
       }),
+      outputSchema: z.object({ name: z.string().nullable(), studentId: z.string().nullable() }),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ session }) => {
@@ -310,7 +401,10 @@ export function registerCampusTools(server: McpServer): void {
       }
       try {
         const profile = await eamsProfile(await deriveEamsSession(cookies));
-        return text(`EAMS 会话可用：${profile.name ?? "姓名未知"}（学号 ${profile.studentId ?? "未知"}）`);
+        return structured(`EAMS 会话可用：${profile.name ?? "姓名未知"}（学号 ${profile.studentId ?? "未知"}）`, {
+          name: profile.name,
+          studentId: profile.studentId,
+        });
       } catch (cause) {
         const message = cause instanceof CampusSessionExpired ? cause.message : (cause as Error).message;
         return { content: [{ type: "text" as const, text: `EAMS 登录失败：${message}` }], isError: true };
@@ -326,6 +420,10 @@ export function registerCampusTools(server: McpServer): void {
       inputSchema: z.object({
         session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
       }),
+      outputSchema: z.object({
+        defaultSemester: z.string().nullable(),
+        semesters: z.array(z.object({ id: z.string(), year: z.string(), name: z.string() })),
+      }),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ session }) => {
@@ -340,7 +438,10 @@ export function registerCampusTools(server: McpServer): void {
         const lines = result.semesters.map(
           (s) => `${s.id === result.defaultSemester ? "★ " : "  "}${s.year} ${s.name} (id=${s.id})`,
         );
-        return text([`共 ${result.semesters.length} 个学期：`, ...lines].join("\n"));
+        return structured([`共 ${result.semesters.length} 个学期：`, ...lines].join("\n"), {
+          defaultSemester: result.defaultSemester,
+          semesters: result.semesters,
+        });
       } catch (cause) {
         const message = cause instanceof CampusSessionExpired ? cause.message : (cause as Error).message;
         return { content: [{ type: "text" as const, text: `EAMS 查询失败：${message}` }], isError: true };
@@ -357,6 +458,7 @@ export function registerCampusTools(server: McpServer): void {
       inputSchema: z.object({
         session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
       }),
+      outputSchema: z.object({ studentId: z.string().nullable() }),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ session }) => {
@@ -368,7 +470,7 @@ export function registerCampusTools(server: McpServer): void {
       }
       try {
         const student = await egateStudent(await deriveEgateSession(cookies));
-        return text(`eGate 会话可用：学号 ${student.studentId ?? "未知"}`);
+        return structured(`eGate 会话可用：学号 ${student.studentId ?? "未知"}`, { studentId: student.studentId });
       } catch (cause) {
         const message = cause instanceof CampusSessionExpired ? cause.message : (cause as Error).message;
         return { content: [{ type: "text" as const, text: `eGate 登录失败：${message}` }], isError: true };
@@ -387,27 +489,44 @@ export function registerCampusTools(server: McpServer): void {
       inputSchema: z.object({
         session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
       }),
+      outputSchema: z.object({
+        userNo: z.string(),
+        userName: z.string(),
+        email: z.string().nullable(),
+        userType: z.string().nullable(),
+        violations: z.array(
+          z.object({ type: z.string(), count: z.number().nullable(), blacklisted: z.boolean() }),
+        ),
+      }),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ session }) => {
       try {
         const profile = await libspaceMe(await platformAuth(session, libspaceSession));
-        const violations = (profile.violationCountList ?? [])
-          .map((v) => {
-            const type = typeof v.reservationType === "string" ? v.reservationType : "?";
-            const count = typeof v.violationCount === "number" ? v.violationCount : "?";
-            const black = v.blacklisted === true ? "（黑名单）" : "";
-            return `${type}: 违约 ${count}${black}`;
-          })
-          .join("；");
-        return text(
+        const violations = (profile.violationCountList ?? []).map((v) => ({
+          type: typeof v.reservationType === "string" ? v.reservationType : "?",
+          count: typeof v.violationCount === "number" ? v.violationCount : null,
+          blacklisted: v.blacklisted === true,
+        }));
+        return structured(
           [
             `${profile.userName}（${profile.userNo}）${profile.userType ? ` · ${profile.userType}` : ""}`,
             profile.email ? `邮箱 ${profile.email}` : "",
-            violations ? `记录：${violations}` : "无违约记录",
+            violations.length
+              ? `记录：${violations
+                  .map((v) => `${v.type}: 违约 ${v.count ?? "?"}${v.blacklisted ? "（黑名单）" : ""}`)
+                  .join("；")}`
+              : "无违约记录",
           ]
             .filter(Boolean)
             .join("\n"),
+          {
+            userNo: profile.userNo,
+            userName: profile.userName,
+            email: profile.email ?? null,
+            userType: profile.userType ?? null,
+            violations,
+          },
         );
       } catch (cause) {
         return campusFailure("libspace 账号查询失败", cause);
@@ -431,6 +550,31 @@ export function registerCampusTools(server: McpServer): void {
         floor: z.number().int().min(1).optional().describe("楼层（1 起），省略则不限"),
         limit: z.number().int().min(1).max(100).default(40).describe("最多返回房间数"),
       }),
+      outputSchema: z.object({
+        date: z.string(),
+        type: z.string().nullable(),
+        config: z
+          .object({
+            openStartTime: z.string(),
+            openEndTime: z.string(),
+            minDurationHours: z.number(),
+            maxDurationHours: z.number(),
+            cycleDays: z.number(),
+          })
+          .nullable(),
+        roomCount: z.number(),
+        rooms: z.array(
+          z.object({
+            id: z.number(),
+            spaceName: z.string(),
+            typeCode: z.string(),
+            floorNo: z.number().nullable(),
+            capacity: z.number().nullable(),
+            freeSlots: z.number(),
+            totalSlots: z.number(),
+          }),
+        ),
+      }),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ session, date, type, floor, limit }) => {
@@ -441,13 +585,9 @@ export function registerCampusTools(server: McpServer): void {
         );
         if (rooms.length === 0) return text(`${date} 没有符合条件的房间。`);
 
-        const header = type
-          ? await spaceConfig(auth, type)
-              .then(
-                (c) =>
-                  `${type} 开放 ${c.openStartTime}-${c.openEndTime}，单次 ${c.minDurationHours}-${c.maxDurationHours} 小时，可预约未来 ${c.cycleDays} 天`,
-              )
-              .catch(() => "")
+        const config = type ? await spaceConfig(auth, type).catch(() => null) : null;
+        const header = config
+          ? `${type} 开放 ${config.openStartTime}-${config.openEndTime}，单次 ${config.minDurationHours}-${config.maxDurationHours} 小时，可预约未来 ${config.cycleDays} 天`
           : "（未指定类型，已合并讨论室/研习室/静音舱）";
 
         const lines = rooms.slice(0, limit).map((room) => {
@@ -462,7 +602,35 @@ export function registerCampusTools(server: McpServer): void {
             .join(" · ");
           return `#${room.id} ${room.spaceName}${meta ? ` | ${meta}` : ""} | 空闲 ${free}/${slots.length} 段`;
         });
-        return text([header, `共 ${rooms.length} 间（显示 ${lines.length}）：`, ...lines].filter(Boolean).join("\n"));
+        return structured(
+          [header, `共 ${rooms.length} 间（显示 ${lines.length}）：`, ...lines].filter(Boolean).join("\n"),
+          {
+            date,
+            type: type ?? null,
+            config: config
+              ? {
+                  openStartTime: config.openStartTime,
+                  openEndTime: config.openEndTime,
+                  minDurationHours: config.minDurationHours,
+                  maxDurationHours: config.maxDurationHours,
+                  cycleDays: config.cycleDays,
+                }
+              : null,
+            roomCount: rooms.length,
+            rooms: rooms.slice(0, limit).map((room) => {
+              const slots = room.slots ?? [];
+              return {
+                id: room.id,
+                spaceName: room.spaceName,
+                typeCode: room.typeCode,
+                floorNo: room.floorNo ?? null,
+                capacity: room.capacity ?? null,
+                freeSlots: slots.filter((s) => s.statusCode === "AVAILABLE").length,
+                totalSlots: slots.length,
+              };
+            }),
+          },
+        );
       } catch (cause) {
         return campusFailure("libspace 房间查询失败", cause);
       }
@@ -479,12 +647,24 @@ export function registerCampusTools(server: McpServer): void {
         space_id: z.number().int().positive().describe("空间 id（libspace_spaces 返回的 #id）"),
         date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe("日期 YYYY-MM-DD"),
       }),
+      outputSchema: z.object({
+        spaceId: z.number(),
+        date: z.string(),
+        slots: z.array(z.object({ time: z.string(), statusCode: z.string() })),
+        segments: z.array(z.object({ start: z.string(), end: z.string(), statusCode: z.string() })),
+      }),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ session, space_id, date }) => {
       try {
         const detail = await libspaceSchedule(await platformAuth(session, libspaceSession), space_id, date);
-        return text(`${detail.date} 空间 #${detail.spaceId}：\n${groupSlots(detail.slots)}`);
+        const segments = mergeSegments(detail.slots);
+        return structured(`${detail.date} 空间 #${detail.spaceId}：\n${formatSegments(segments)}`, {
+          spaceId: detail.spaceId,
+          date: detail.date,
+          slots: detail.slots.map((s) => ({ time: s.time, statusCode: s.statusCode })),
+          segments,
+        });
       } catch (cause) {
         return campusFailure("libspace 时段查询失败", cause);
       }
@@ -508,6 +688,43 @@ export function registerCampusTools(server: McpServer): void {
         date_end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("结束日期"),
         limit: z.number().int().min(1).max(50).default(10).describe("最多返回条数"),
       }),
+      outputSchema: z.object({
+        mode: z.enum(["list", "detail"]),
+        total: z.number().optional(),
+        items: z
+          .array(
+            z.object({
+              reservationId: z.number(),
+              spaceName: z.string(),
+              reserveDate: z.string(),
+              startTime: z.string(),
+              endTime: z.string(),
+              status: z.string(),
+              statusText: z.string(),
+              canExtend: z.boolean(),
+              signInWindow: z.boolean(),
+            }),
+          )
+          .optional(),
+        reservation: z
+          .object({
+            reservationId: z.number(),
+            spaceName: z.string(),
+            reserveDate: z.string(),
+            startTime: z.string(),
+            endTime: z.string(),
+            status: z.string(),
+            statusText: z.string(),
+            canExtend: z.boolean(),
+            signInWindow: z.boolean(),
+            topic: z.string().nullable(),
+            participants: z.string().nullable(),
+          })
+          .optional(),
+        extendOptions: z
+          .object({ allow: z.boolean(), maxExtendTimes: z.number().nullable(), options: z.array(z.unknown()) })
+          .optional(),
+      }),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ session, reservation_id, tab, space_type, room_name, status, date_start, date_end, limit }) => {
@@ -529,7 +746,29 @@ export function registerCampusTools(server: McpServer): void {
                 ? "当前不可延长"
                 : "",
           ];
-          return text(lines.filter(Boolean).join("\n"));
+          return structured(lines.filter(Boolean).join("\n"), {
+            mode: "detail",
+            reservation: {
+              reservationId: detail.reservationId,
+              spaceName: detail.spaceName,
+              reserveDate: detail.reserveDate,
+              startTime: detail.startTime,
+              endTime: detail.endTime,
+              status: detail.reservationStatus,
+              statusText: detail.reservationStatusStr ?? detail.reservationStatus,
+              canExtend: detail.canExtend ?? false,
+              signInWindow: detail.signInWindow ?? false,
+              topic: detail.meetingTopic ?? null,
+              participants: detail.participantsName ?? null,
+            },
+            extendOptions: options
+              ? {
+                  allow: options.allow ?? false,
+                  maxExtendTimes: options.maxExtendTimes ?? null,
+                  options: options.options ?? [],
+                }
+              : undefined,
+          });
         }
 
         const page = await libspaceReservations(auth, {
@@ -549,7 +788,21 @@ export function registerCampusTools(server: McpServer): void {
               r.reservationStatusStr ?? r.reservationStatus
             }${r.canExtend ? " | 可延长" : ""}${r.signInWindow ? " | 可签到" : ""}`,
         );
-        return text([`共 ${page.total ?? lines.length} 条（显示 ${lines.length}）：`, ...lines].join("\n"));
+        return structured([`共 ${page.total ?? lines.length} 条（显示 ${lines.length}）：`, ...lines].join("\n"), {
+          mode: "list",
+          total: page.total ?? page.list.length,
+          items: page.list.map((r) => ({
+            reservationId: r.reservationId,
+            spaceName: r.spaceName,
+            reserveDate: r.reserveDate,
+            startTime: r.startTime,
+            endTime: r.endTime,
+            status: r.reservationStatus,
+            statusText: r.reservationStatusStr ?? r.reservationStatus,
+            canExtend: r.canExtend ?? false,
+            signInWindow: r.signInWindow ?? false,
+          })),
+        });
       } catch (cause) {
         return campusFailure("libspace 预约查询失败", cause);
       }
