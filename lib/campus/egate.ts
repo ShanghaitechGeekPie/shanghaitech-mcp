@@ -49,7 +49,7 @@ export async function deriveEgateSession(root: CookieJar): Promise<CookieJar> {
 }
 
 /** The app-config preflight is side-effect-free and keeps MOD_AUTH_CAS/_WEU current. */
-export async function egateStudent(cookies: CookieJar): Promise<{ studentId: string | null; name: string | null }> {
+export async function egateStudent(cookies: CookieJar): Promise<{ studentId: string | null }> {
   const primed = await follow(`${APP_CONFIG_URL}?v=${Date.now()}`, { jar: cookies, maxHops: 4 });
   assertAlive(primed.url, primed.text);
 
@@ -62,8 +62,11 @@ export async function egateStudent(cookies: CookieJar): Promise<{ studentId: str
   } catch (cause) {
     throw new Error(`egate-app 学生信息接口返回异常：${(cause as Error).message}`);
   }
-  if (String(parsed.code) !== "0") throw new Error(`egate-app 返回 code=${parsed.code}`);
+  if (String(parsed.code) !== "0") {
+    if (String(parsed.code) === "404") throw new CampusSessionExpired("egate-app 应用会话未初始化（code=404），请重新 ids_login");
+    throw new Error(`egate-app 返回 code=${parsed.code}`);
+  }
 
   const row = parsed.datas?.hqdlxsjpcxx?.rows[0];
-  return { studentId: row?.XSBH ?? null, name: row?.XM ?? null };
+  return { studentId: row?.XSBH ?? null };
 }

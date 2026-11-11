@@ -97,16 +97,18 @@ export interface EamsProfile {
 }
 
 export async function eamsProfile(cookies: CookieJar): Promise<EamsProfile> {
-  const table = await follow(`${EAMS_BASE}/eams/courseTableForStd.action`, { jar: cookies, maxHops: 4 });
-  assertAlive(table.url, table.text);
-  const studentId = table.text.match(/bg\.form\.addInput\(form,"ids","(\d+)"\)/)?.[1] ?? null;
-
-  const detail = await follow(`${EAMS_BASE}/eams/stdDetail.action`, { jar: table.jar, maxHops: 4 });
+  const detail = await follow(`${EAMS_BASE}/eams/stdDetail.action`, { jar: cookies, maxHops: 4 });
   assertAlive(detail.url, detail.text);
+
+  // Labels are localised ("姓名：" / "Name："), values live in the next <td>.
+  const studentId = detail.text.match(/Student No[：:]\s*<\/td>\s*<td[^>]*>(\d+)</)?.[1] ?? null;
   const name =
-    detail.text.match(/姓名[：:]\s*<\/td>\s*<td[^>]*>([^<]+)<\/td>/)?.[1] ??
-    detail.text.match(/姓名[：:][\s\S]{0,200}?<td[^>]*>([^<]{1,40})<\/td>/)?.[1] ??
+    detail.text.match(/(?:^|>)(?:Name|姓名)[：:]\s*<\/td>\s*<td[^>]*>([^<]{1,40})</)?.[1] ??
+    detail.text.match(/id='photoImg'[\s\S]{0,200}?alt="([^"]{1,40})"/)?.[1] ??
     null;
 
-  return { studentId, name: name ? name.replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim() : null };
+  return {
+    studentId,
+    name: name ? name.replace(/\u00a0/g, " ").trim() : null,
+  };
 }

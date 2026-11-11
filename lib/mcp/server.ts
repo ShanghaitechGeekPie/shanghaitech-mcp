@@ -324,7 +324,7 @@ export function registerCampusTools(server: McpServer): void {
       }
       try {
         const student = await egateStudent(await deriveEgateSession(cookies));
-        return text(`eGate 会话可用：${student.name ?? "姓名未知"}（学号 ${student.studentId ?? "未知"}）`);
+        return text(`eGate 会话可用：学号 ${student.studentId ?? "未知"}`);
       } catch (cause) {
         const message = cause instanceof CampusSessionExpired ? cause.message : (cause as Error).message;
         return { content: [{ type: "text" as const, text: `eGate 登录失败：${message}` }], isError: true };
