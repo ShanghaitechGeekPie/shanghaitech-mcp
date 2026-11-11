@@ -14,6 +14,7 @@
 | EAMS 身份 / 学期列表 | ✅ 工具 `eams_profile`、`eams_semesters` |
 | eGate 学生信息 | ✅ 工具 `egate_student` |
 | 图书馆空间预约（libspace） | ✅ 6 个工具：账号 / 查房间 / 查时段 / 我的预约 / 创建 / 签到·取消·提前结束·延长 |
+| eCourse（TronClass） | ✅ 6 个工具：课程 / 作业与截止 / 考试 / 同班同学 / 课件 / 课件下载 |
 | 静态 bearer token 兜底（IDE/CI） | ✅ `MCP_AUTH_TOKEN` |
 
 ## 为什么是 Next.js + Vercel
@@ -84,6 +85,7 @@ GET /spaceReservationApp/api/callBack?code&state → {"access_token":"AT-…","e
 pnpm install
 cp .env.example .env.local
 pnpm dev                 # http://localhost:3000
+# 本机若要走代理出网（eCourse/EAMS 等校园域名）：NODE_OPTIONS=--use-env-proxy pnpm dev
 ```
 
 环境变量至少要有 `MCP_ENC_KEY`（`openssl rand -base64 32`），否则 `ids_login` 会明确报错。

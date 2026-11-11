@@ -9,6 +9,16 @@ import {
   type CourseSummary,
 } from "@/lib/campus/coursebench";
 import { CampusSessionExpired, deriveEamsSession, eamsProfile, eamsSemesters } from "@/lib/campus/eams";
+import {
+  EcourseError,
+  deriveEcourseSession,
+  listActivities,
+  listCourses,
+  listEnrollments,
+  listExams,
+  uploadInfo,
+  uploadUrl,
+} from "@/lib/campus/ecourse";
 import { deriveEgateSession, egateStudent } from "@/lib/campus/egate";
 import {
   LibspaceError,
@@ -72,11 +82,21 @@ async function platformAuth<T extends object>(
   return derive(unseal<IdsSessionToken>(session).cookies);
 }
 
+async function ecourseAuth(session: string) {
+  return platformAuth(session, deriveEcourseSession);
+}
+
+function formatDeadline(iso: string | null | undefined): string {
+  if (!iso) return "无截止";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toISOString().replace("T", " ").slice(0, 16) + " UTC";
+}
+
 function campusFailure(prefix: string, cause: unknown) {
   const err = cause instanceof Error ? cause : undefined;
   const nested = err?.cause instanceof Error ? ` (${err.cause.message})` : "";
   const message =
-    cause instanceof CampusSessionExpired || cause instanceof LibspaceError
+    cause instanceof CampusSessionExpired || cause instanceof LibspaceError || cause instanceof EcourseError
       ? `${cause.message}${nested}`
       : `${err?.message ?? String(cause)}${nested}`;
   return { content: [{ type: "text" as const, text: `${prefix}：${message}` }], isError: true };
@@ -912,6 +932,337 @@ export function registerCampusTools(server: McpServer): void {
         return text(`已执行${label}，平台回执：${receipt}`);
       } catch (cause) {
         return campusFailure(`libspace ${label}失败`, cause);
+      }
+    },
+  );
+
+  // ---------------------------------------------------------------- ecourse
+
+  server.registerTool(
+    "ecourse_courses",
+    {
+      title: "eCourse 我的课程",
+      description: "列出本学期的 eCourse（TronClass）课程：课程 id、名称、课程号、院系、教师、选课人数。后续作业/考试/课件工具都用课程 id。",
+      inputSchema: z.object({
+        session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
+      }),
+      outputSchema: z.object({
+        count: z.number(),
+        courses: z.array(
+          z.object({
+            id: z.number(),
+            name: z.string(),
+            code: z.string().nullable(),
+            year: z.string().nullable(),
+            department: z.string().nullable(),
+            instructors: z.array(z.string()),
+            studentCount: z.number().nullable(),
+          }),
+        ),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ session }) => {
+      try {
+        const courses = await listCourses(await ecourseAuth(session));
+        const lines = courses.map(
+          (c) =>
+            `#${c.id} ${c.name}${c.course_code ? ` (${c.course_code})` : ""} | ${c.department?.name ?? "-"} | ${
+              (c.instructors ?? []).map((i) => i.name).join("/") || "-"
+            } | ${c.course_attributes?.student_count ?? "?"} 人`,
+        );
+        return structured([`共 ${courses.length} 门课程：`, ...lines].join("\n"), {
+          count: courses.length,
+          courses: courses.map((c) => ({
+            id: c.id,
+            name: c.name,
+            code: c.course_code ?? null,
+            year: c.academic_year?.name ?? null,
+            department: c.department?.name ?? null,
+            instructors: (c.instructors ?? []).map((i) => i.name),
+            studentCount: c.course_attributes?.student_count ?? null,
+          })),
+        });
+      } catch (cause) {
+        return campusFailure("ecourse 课程查询失败", cause);
+      }
+    },
+  );
+
+  server.registerTool(
+    "ecourse_assignments",
+    {
+      title: "eCourse 作业与截止时间",
+      description:
+        "汇总作业（homework）及其截止时间，按截止先后排序。省略 course_id 时遍历我的课程（可用 course_limit 限制）；include_closed=false 可只看未截止。",
+      inputSchema: z.object({
+        session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
+        course_id: z.number().int().positive().optional().describe("只看这门课（ecourse_courses 的 id）"),
+        include_closed: z.boolean().default(true).describe("是否包含已截止/已关闭的作业"),
+        course_limit: z.number().int().min(1).max(20).default(10).describe("未指定 course_id 时最多遍历多少门课"),
+        limit: z.number().int().min(1).max(100).default(40).describe("最多返回条数"),
+      }),
+      outputSchema: z.object({
+        count: z.number(),
+        items: z.array(
+          z.object({
+            courseId: z.number(),
+            courseName: z.string(),
+            activityId: z.number(),
+            title: z.string(),
+            dueAt: z.string().nullable(),
+            closed: z.boolean(),
+          }),
+        ),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ session, course_id, include_closed, course_limit, limit }) => {
+      try {
+        const auth = await ecourseAuth(session);
+        const courses = (await listCourses(auth))
+          .filter((c) => course_id === undefined || c.id === course_id)
+          .slice(0, course_limit);
+        const perCourse = await Promise.all(
+          courses.map(async (c) => ({ course: c, activities: await listActivities(auth, c.id) })),
+        );
+        const items = perCourse
+          .flatMap(({ course, activities }) =>
+            activities
+              .filter((a) => a.type === "homework")
+              .map((a) => ({
+                courseId: course.id,
+                courseName: course.name,
+                activityId: a.id,
+                title: a.title,
+                dueAt: a.end_time ?? null,
+                closed: a.is_closed === true || (a.end_time ? Date.parse(a.end_time) < Date.now() : false),
+              })),
+          )
+          .filter((a) => include_closed || !a.closed)
+          .sort((a, b) => (a.dueAt ?? "9999").localeCompare(b.dueAt ?? "9999"))
+          .slice(0, limit);
+
+        if (items.length === 0) return text(include_closed ? "没有作业。" : "没有未截止的作业。");
+        const lines = items.map(
+          (a) => `[${a.courseName}] ${a.title} | 截止 ${formatDeadline(a.dueAt)}${a.closed ? " (已关闭)" : ""} | #${a.activityId}`,
+        );
+        return structured([`共 ${items.length} 条作业：`, ...lines].join("\n"), { count: items.length, items });
+      } catch (cause) {
+        return campusFailure("ecourse 作业查询失败", cause);
+      }
+    },
+  );
+
+  server.registerTool(
+    "ecourse_exams",
+    {
+      title: "eCourse 考试",
+      description: "汇总考试安排（含开始/结束时间）与标题。省略 course_id 时遍历我的课程。",
+      inputSchema: z.object({
+        session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
+        course_id: z.number().int().positive().optional().describe("只看这门课"),
+        course_limit: z.number().int().min(1).max(20).default(10).describe("未指定 course_id 时最多遍历多少门课"),
+        limit: z.number().int().min(1).max(100).default(40).describe("最多返回条数"),
+      }),
+      outputSchema: z.object({
+        count: z.number(),
+        items: z.array(
+          z.object({
+            courseId: z.number(),
+            courseName: z.string(),
+            examId: z.number(),
+            title: z.string(),
+            startAt: z.string().nullable(),
+            endAt: z.string().nullable(),
+          }),
+        ),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ session, course_id, course_limit, limit }) => {
+      try {
+        const auth = await ecourseAuth(session);
+        const courses = (await listCourses(auth))
+          .filter((c) => course_id === undefined || c.id === course_id)
+          .slice(0, course_limit);
+        const perCourse = await Promise.all(courses.map(async (c) => ({ course: c, exams: await listExams(auth, c.id) })));
+        const items = perCourse
+          .flatMap(({ course, exams }) =>
+            exams.map((e) => ({
+              courseId: course.id,
+              courseName: course.name,
+              examId: e.id,
+              title: e.title,
+              startAt: e.start_time ?? null,
+              endAt: e.end_time ?? null,
+            })),
+          )
+          .sort((a, b) => (a.startAt ?? "9999").localeCompare(b.startAt ?? "9999"))
+          .slice(0, limit);
+
+        if (items.length === 0) return text("没有考试安排。");
+        return structured(
+          [
+            `共 ${items.length} 场考试：`,
+            ...items.map(
+              (e) => `[${e.courseName}] ${e.title} | ${formatDeadline(e.startAt)} → ${formatDeadline(e.endAt)} | #${e.examId}`,
+            ),
+          ].join("\n"),
+          { count: items.length, items },
+        );
+      } catch (cause) {
+        return campusFailure("ecourse 考试查询失败", cause);
+      }
+    },
+  );
+
+  server.registerTool(
+    "ecourse_classmates",
+    {
+      title: "eCourse 同班同学",
+      description: "列出某门课的学生名单（学号、姓名、邮箱；平台会对邮箱打码）。教师/助教不在此列。",
+      inputSchema: z.object({
+        session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
+        course_id: z.number().int().positive().describe("课程 id"),
+        limit: z.number().int().min(1).max(200).default(100).describe("最多返回人数"),
+      }),
+      outputSchema: z.object({
+        count: z.number(),
+        students: z.array(
+          z.object({ name: z.string().nullable(), userNo: z.string().nullable(), email: z.string().nullable() }),
+        ),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ session, course_id, limit }) => {
+      try {
+        const enrollments = await listEnrollments(await ecourseAuth(session), course_id);
+        const students = enrollments
+          .filter((e) => e.roles.includes("student"))
+          .map((e) => ({
+            name: e.user?.name ?? null,
+            userNo: e.user?.user_no ?? null,
+            email: e.user?.email ?? null,
+          }))
+          .slice(0, limit);
+        if (students.length === 0) return text("该课程没有可列出的学生（可能无权限或名单为空）。");
+        return structured(
+          [
+            `共 ${students.length} 名学生：`,
+            ...students.map((s) => `${s.userNo ?? "?"} ${s.name ?? "?"}${s.email ? ` ${s.email}` : ""}`),
+          ].join("\n"),
+          { count: students.length, students },
+        );
+      } catch (cause) {
+        return campusFailure("ecourse 同学名单查询失败", cause);
+      }
+    },
+  );
+
+  server.registerTool(
+    "ecourse_materials",
+    {
+      title: "eCourse 课件列表",
+      description: "列出某门课的课件（material 活动）及其附件：upload id、文件名、大小。用 ecourse_material_download 取下载链接。",
+      inputSchema: z.object({
+        session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
+        course_id: z.number().int().positive().describe("课程 id"),
+        limit: z.number().int().min(1).max(200).default(50).describe("最多返回课件数"),
+      }),
+      outputSchema: z.object({
+        count: z.number(),
+        items: z.array(
+          z.object({
+            activityId: z.number(),
+            title: z.string(),
+            published: z.boolean(),
+            uploads: z.array(z.object({ id: z.number(), name: z.string(), size: z.number().nullable() })),
+          }),
+        ),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ session, course_id, limit }) => {
+      try {
+        const activities = await listActivities(await ecourseAuth(session), course_id);
+        const items = activities
+          .filter((a) => a.type === "material")
+          .map((a) => ({
+            activityId: a.id,
+            title: a.title,
+            published: a.published !== false,
+            uploads: (a.uploads ?? []).map((u) => ({ id: u.id, name: u.name, size: u.size ?? null })),
+          }))
+          .slice(0, limit);
+        if (items.length === 0) return text("该课程暂无课件。");
+        const lines = items.flatMap((it) => [
+          `${it.title}${it.published ? "" : "（未发布）"}`,
+          ...it.uploads.map((u) => `  - ${u.name} [upload #${u.id}]${u.size ? ` ${(u.size / 1024).toFixed(0)}KB` : ""}`),
+        ]);
+        return structured([`共 ${items.length} 个课件：`, ...lines].join("\n"), { count: items.length, items });
+      } catch (cause) {
+        return campusFailure("ecourse 课件查询失败", cause);
+      }
+    },
+  );
+
+  server.registerTool(
+    "ecourse_material_download",
+    {
+      title: "eCourse 课件下载",
+      description:
+        "为某个课件附件生成短时有效的签名下载链接（可直接 curl / 浏览器打开，支持 Range）。链接带 token 与到期时间，不要长期缓存或转发。",
+      inputSchema: z.object({
+        session: z.string().min(1).describe("ids_login 返回的 session 句柄"),
+        upload_id: z.number().int().positive().describe("ecourse_materials 返回的 upload id"),
+      }),
+      outputSchema: z.object({
+        uploadId: z.number(),
+        name: z.string(),
+        size: z.number().nullable(),
+        downloadable: z.boolean(),
+        url: z.string(),
+        expiresAt: z.string().nullable(),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ session, upload_id }) => {
+      try {
+        const auth = await ecourseAuth(session);
+        const [info, signed] = await Promise.all([uploadInfo(auth, upload_id), uploadUrl(auth, upload_id)]);
+        const expires = signed.expiresAt ? new Date(signed.expiresAt).toISOString() : null;
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: [
+                `${info.name}${info.size ? ` (${(info.size / 1024).toFixed(0)}KB)` : ""}`,
+                info.allow_download === false ? "平台标记为不允许下载" : "下载链接（短时有效）：",
+                signed.url,
+                expires ? `到期：${expires}` : "",
+              ]
+                .filter(Boolean)
+                .join("\n"),
+            },
+            {
+              type: "resource_link" as const,
+              uri: signed.url,
+              name: info.name,
+              mimeType: info.type ?? "application/octet-stream",
+            },
+          ],
+          structuredContent: {
+            uploadId: upload_id,
+            name: info.name,
+            size: info.size ?? null,
+            downloadable: info.allow_download !== false,
+            url: signed.url,
+            expiresAt: expires,
+          },
+        };
+      } catch (cause) {
+        return campusFailure("ecourse 课件下载失败", cause);
       }
     },
   );

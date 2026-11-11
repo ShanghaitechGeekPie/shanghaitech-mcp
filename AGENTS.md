@@ -58,6 +58,7 @@ Tool-surface rules (naming, budgets, schemas, outputs, annotations, error classe
 | `lib/campus/seal.ts` | AES-256-GCM sealing of session handles (`seal`/`unseal`, 12 h TTL enforced on open). |
 | `lib/campus/http.ts` | Shared cookie jar + `follow()` (manual redirects, per-hop `Set-Cookie`). |
 | `lib/campus/eams.ts`, `egate.ts` | Platform adapters ported from `/home/zambar/repos/shanghaitech-cpdaily-auth` (TechPie backend). |
+| `lib/campus/ecourse.ts` | TronClass. SPA + Keycloak CAS broker: `ecourse/login → ecourse:8600/auth/realms/shanghaitech/protocol/cas → IDS CAS`; session is `session=V2-…` plus `KEYCLOAK_*` cookies. API: `/api/my-courses`, `/api/courses/{id}/activities`, `/api/courses/{id}/exams`, `/api/course/{id}/enrollments`, `/api/uploads/{id}/url` (signed, Range-capable). |
 | `lib/campus/libspace.ts` | Library-space booking. Different credential shape: IDS **OAuth2 code** → `access_token`, sent as header `token:` (not `Authorization: Bearer`). Derived per call; no cookie session. |
 | `scripts/smoke-mcp.sh` | initialize + tools/list against a running endpoint. |
 
@@ -112,6 +113,10 @@ curl -s -X POST http://localhost:3000/api/mcp \
 - Do **not** introduce `@modelcontextprotocol/sdk` (v1 maintenance line), `@vercel/mcp-adapter` (superseded), `@vercel/kv` (sunset) or the 2024-11-05 HTTP+SSE transport.
 - No stdio transport in this repo: Vercel functions are per-request. Local stdio access, if ever needed, is `mcp-remote` on the client side.
 - Region: `hkg1` for China latency. Hobby caps: 300 s `maxDuration`, 1 WAF rate-limit rule — plan rate limiting in code (`@upstash/ratelimit`) rather than relying on WAF.
+
+## Local network caveat
+
+Campus hosts are reached **through the machine's HTTP proxy** in this environment (`HTTPS_PROXY`). Node's fetch ignores it unless the process starts with `NODE_OPTIONS=--use-env-proxy` (Node ≥24). Without it every campus call fails with `fetch failed (ETIMEDOUT)`. Vercel has direct egress, so no flag is needed there.
 
 ## Testing & QA
 
