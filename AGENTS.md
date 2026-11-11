@@ -4,7 +4,7 @@
 
 `shanghaitech-mcp` is a **campus MCP (Model Context Protocol) server for ShanghaiTech University**. Goal: one deployed endpoint that exposes campus platforms (CourseBench, EAMS, eGate, eCourse, gym booking, …) as MCP tools, with per-student identity derived from the campus IDS 统一身份认证.
 
-Current state (v0.1.0): the MCP endpoint and the tool-registration layer are live; three CourseBench tools are implemented against public data (no campus login required). IDS authentication helpers exist but the per-user OAuth bridge is **not** wired yet — the endpoint is protected by a single optional static bearer token. Do not document or claim per-user campus auth until it lands.
+Current state (v0.1.0): the MCP endpoint and the tool-registration layer are live; three CourseBench tools work against public data; `ids_login` logs into campus IDS with a student's username/password and returns a sealed, expiring session handle (`ids_status` verifies it). There is **no OAuth** — an explicit product decision. The MCP endpoint itself is protected by an optional static bearer token (`MCP_AUTH_TOKEN`).
 
 ## Architecture & Data Flow
 
@@ -31,7 +31,8 @@ Key properties to preserve:
 - **Stateless by construction.** `mcp-handler@2` builds the server per request; there is no `Mcp-Session-Id`, no in-memory `Map`, no SSE session store. Anything that must survive across tool calls becomes an explicit handle argument backed by a real store (Postgres/Redis) — never module-level state, because Vercel instances are not shared.
 - **One module per upstream platform** under `lib/campus/`, exposing typed functions plus a typed error class (`CourseBenchError`). Tool code only formats; it does not `fetch` upstream APIs directly.
 - **Failures are data.** Upstream errors are converted into MCP tool results with `isError: true` and a readable Chinese message; they never throw out of the handler.
-- Auth architecture (decided, not yet built): the server is both OAuth 2.1 authorization server and protected resource. Campus IDS is the **login backend** of `/authorize`, never the MCP credential — the spec forbids token passthrough. Access tokens must be JWTs with `aud` = the MCP endpoint URL.
+- **Auth is credential login, not OAuth.** `ids_login` takes IDS username + password, performs the real CAS form login (`GET login page → checkNeedCaptcha → POST login → CASTGC`), and returns an opaque `v1.<iv>.<tag>.<ct>` handle sealed with AES-256-GCM (`MCP_ENC_KEY`). Passwords are used in-request and never persisted. Campus state travels in the handle — no DB, no session store, no memory.
+- **Captcha is part of the contract.** IDS escalates captcha by egress IP. `ids_login` returns an image + encrypted `continuation` instead of retrying; never auto-retry a failed login.
 
 ## Key Directories
 
@@ -40,8 +41,10 @@ Key properties to preserve:
 | `app/api/mcp/route.ts` | The only MCP entry point; route segment config (`runtime`, `maxDuration`, `dynamic`). |
 | `app/page.tsx`, `app/layout.tsx` | Minimal landing page (endpoint URL, tool list, connector snippet). |
 | `lib/mcp/server.ts` | `registerCampusTools(server)` — every tool definition lives here. |
-| `lib/mcp/auth.ts` | `withBearerAuth()` — static-token gate; the place where OAuth resource-server verification will replace `withMcpAuth`. |
-| `lib/campus/` | Upstream platform clients (`coursebench.ts`, `ids.ts`). |
+| `lib/mcp/auth.ts` | `withBearerAuth()` — static-token gate for the MCP endpoint. |
+| `lib/campus/ids-auth.ts` | Password login: page parsing, `encryptPassword` (AES-128-CBC port of site JS), manual cookie jar, error-code mapping, service-ticket minting. |
+| `lib/campus/ids.ts` | CAS URLs + p3/serviceValidate ticket redemption (server-to-server). |
+| `lib/campus/seal.ts` | AES-256-GCM sealing of session handles (`seal`/`unseal`, 12 h TTL enforced on open). |
 | `scripts/smoke-mcp.sh` | initialize + tools/list against a running endpoint. |
 
 ## Development Commands
@@ -74,7 +77,8 @@ curl -s -X POST http://localhost:3000/api/mcp \
 - **Tool contract**: `registerTool(name, { title, description, inputSchema: z.object({...}), annotations }, handler)`. Inputs are Zod objects (v2 SDK Standard Schema), always with `.describe()` in Chinese. `annotations.readOnlyHint: true` for read-only tools. Return `{ content: [{ type: "text", text }] }`.
 - **User-facing strings are Chinese** (tool descriptions, error messages, page copy). Code comments and identifiers are English.
 - **Async/errors**: `async` handlers, `AbortSignal.timeout(...)` on every outbound fetch, explicit `res.ok` checks, typed error classes per platform. No silent `catch {}`; convert to a user-visible result or rethrow with context.
-- **Env access** only at module scope or in the function that owns it, always with a default (`process.env.X ?? "https://…"`); secrets never logged, never in tool arguments.
+- **Env access** only at module scope or in the function that owns it, always with a default (`process.env.X ?? "https://…"`); secrets never logged, never in tool arguments unless the tool's job is to accept credentials (`ids_login`).
+- **Session handles**: tools never take a raw cookie; they take the sealed handle from `ids_login` and call `unseal()` first. Never add a module-level `Map` cache for sessions.
 - **Next.js route config**: `runtime = "nodejs"` (edge deprecated), `maxDuration = 300`, `dynamic = "force-dynamic"`. Do not add `basePath`/`sseEndpoint`-style options — removed in `mcp-handler` 2.x.
 
 ## Important Files
@@ -83,7 +87,7 @@ curl -s -X POST http://localhost:3000/api/mcp \
 - `lib/mcp/server.ts` — single source of truth for exposed tools.
 - `lib/mcp/auth.ts` — authentication seam.
 - `lib/campus/ids.ts` — CAS wire facts (`/authserver/login`, `/authserver/p3/serviceValidate?format=JSON`). Treat these paths and behaviours as verified production facts.
-- `.env.example` — every supported env var; `MCP_AUTH_TOKEN`, `IDS_BASE_URL`, `COURSEBENCH_BASE_URL`, `PUBLIC_BASE_URL`.
+- `.env.example` — every supported env var: `MCP_AUTH_TOKEN`, `MCP_ENC_KEY` (required by `ids_login`), `IDS_BASE_URL`, `COURSEBENCH_BASE_URL`, `PUBLIC_BASE_URL`.
 - `next.config.ts`, `tsconfig.json`, `package.json` — nothing exotic; keep them boring.
 
 ## Runtime/Tooling Preferences
@@ -98,5 +102,6 @@ curl -s -X POST http://localhost:3000/api/mcp \
 
 - No unit-test framework yet. Gates before pushing: `pnpm lint` (tsc) and `pnpm build`, then `scripts/smoke-mcp.sh` against a running build.
 - Manual protocol verification uses the MCP Inspector (`pnpm mcp:inspect`) or the `curl` snippet above; a real client (Claude/Cursor) is the final check for auth/connector behaviour.
+- `ids_login` smoke test uses a **non-existent** student id (e.g. `0000000000`) with any password: the expected, verified result is `登录失败（bad_credentials）：用户名或密码错误`. A success there would mean the mock is wrong; a `session_expired` error means the AES port or cookie jar broke.
 - When platform clients grow logic (parsing, retries, credential derivation), add `vitest` and test the pure functions (`averageScore`, ticket-response parsing, error-string classification). Do not write tests that only assert a fetch was called.
 - Never test campus flows with real credentials from CI. Captcha escalation on IDS is keyed to **egress IP**; repeated failed logins from one host poison captcha state for every user behind that IP.
