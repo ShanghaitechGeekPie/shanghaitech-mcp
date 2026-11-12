@@ -132,6 +132,12 @@ curl -s -X POST http://localhost:3000/api/mcp \
 
 Campus hosts are reached **through the machine's HTTP proxy** in this environment (`HTTPS_PROXY`). Node's fetch ignores it unless the process starts with `NODE_OPTIONS=--use-env-proxy` (Node ≥24). Without it every campus call fails with `fetch failed (ETIMEDOUT)`. Vercel has direct egress, so no flag is needed there.
 
+## Docker / CI
+
+- `Dockerfile`: three stages (deps → builder → runner), Next.js `output: "standalone"`; runner copies `public`, `.next/standalone`, `.next/static` and runs `node server.js` as uid 1001. Secrets are runtime env only.
+- `.github/workflows/docker.yml`: builds on PR (with `load: true` + a `tools/list` smoke test) and pushes `ghcr.io/<repo>` on `main`/tags with gha cache.
+- `pnpm build` runs inside the image build, so a type error fails CI.
+
 ## Testing & QA
 
 - No unit-test framework yet. Gates before pushing: `pnpm lint` (tsc) and `pnpm build`, then `scripts/smoke-mcp.sh` against a running build.

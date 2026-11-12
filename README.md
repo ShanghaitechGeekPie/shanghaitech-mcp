@@ -123,6 +123,24 @@ vercel --prod
 
 建议 region 选 `hkg1`。生产环境必须设置 `MCP_AUTH_TOKEN`，否则 `/api/mcp` 对公网开放。
 
+## Docker
+
+```bash
+docker build -t shanghaitech-mcp .
+docker run -p 3000:3000 \
+  -e MCP_ENC_KEY="$(openssl rand -base64 32)" \
+  -e MCP_AUTH_TOKEN="$(openssl rand -hex 32)" \
+  shanghaitech-mcp
+```
+
+镜像基于 Next.js standalone 输出（`node server.js`），约 380MB，非 root 用户运行；密钥全部走运行时环境变量，不烘进镜像。
+
+GitHub Actions（`.github/workflows/docker.yml`）：push 到 `main` / `v*` tag 时构建并推送到 GHCR（`ghcr.io/<owner>/shanghaitech-mcp`），PR 只构建 + 跑一次 `tools/list` 冒烟，不推送。
+
+```bash
+docker pull ghcr.io/hezebang/shanghaitech-mcp:latest
+```
+
 ## 客户端接入
 
 IDE / CLI（Cursor、Claude Code、Codex …）：
