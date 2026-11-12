@@ -157,8 +157,10 @@ export interface WikiPage {
  * body server-side into `<template slot="contents">`, so we fall back to that:
  * no credentials needed for public pages.
  */
+let graphqlPageBlocked = false;
+
 export async function wikiPage(path: string, locale = "zh"): Promise<WikiPage | null> {
-  if (TOKEN) {
+  if (TOKEN && !graphqlPageBlocked) {
     try {
       const data = await gql<unknown>(
         `query($path: String!, $locale: String!) { pages { singleByPath(path: $path, locale: $locale) { id title path description content createdAt updatedAt } } }`,
@@ -179,7 +181,10 @@ export async function wikiPage(path: string, locale = "zh"): Promise<WikiPage | 
       }
     } catch (cause) {
       if (!(cause instanceof WikiError) || cause.code !== "forbidden") throw cause;
-      // fall through to the rendered page
+      // This deployment blocks page content over GraphQL even for admin keys
+      // (verified: Administrator + list/tree OK, singleByPath → 6013). Remember
+      // it so we do not pay a failed round trip on every read.
+      graphqlPageBlocked = true;
     }
   }
   return wikiPageFromHtml(path, locale);
