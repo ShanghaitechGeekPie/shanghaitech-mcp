@@ -2208,7 +2208,7 @@ export function registerCampusTools(server: McpServer): void {
     {
       title: "WikiTech 上科手册 · 读取页面",
       description:
-        "按路径读取 Wiki 页面正文（Markdown）。长页面可用 offset/max_chars 分段读取以节省上下文。需要服务端配置 WIKI_API_TOKEN（Wiki.js API Access 的 key，pages:read 权限）。",
+        "按路径读取 Wiki 页面正文。公开页面无需 token（走站点渲染）；若配置了有页面读取权限的 WIKI_API_TOKEN，则优先走 GraphQL 拿原始 Markdown 与更新时间。长页面可用 offset/max_chars 分段以节省上下文。",
       inputSchema: z.object({
         path: z.string().min(1).describe("页面路径，如 home、academic、facility/SIST"),
         locale: z.string().default("zh").describe("语言，默认 zh"),

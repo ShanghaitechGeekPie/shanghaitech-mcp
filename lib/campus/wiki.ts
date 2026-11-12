@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { decodeEntities } from "./html";
 import { z } from "zod";
 
 /**
@@ -13,7 +15,24 @@ import { z } from "zod";
  */
 
 export const WIKI_BASE = (process.env.WIKI_BASE_URL ?? "https://wiki.geekpie.club").replace(/\/+$/, "");
-const TOKEN = process.env.WIKI_API_TOKEN?.trim();
+
+/**
+ * API key lookup: env first, then a local file so the key never has to be
+ * pasted into a chat or committed. Vercel uses the env var only.
+ */
+function readToken(): string | undefined {
+  const fromEnv = process.env.WIKI_API_TOKEN?.trim();
+  if (fromEnv) return fromEnv;
+  const file = process.env.WIKI_TOKEN_FILE ?? `${process.env.HOME ?? ""}/.config/shanghaitech-mcp/wiki.token`;
+  try {
+    const token = readFileSync(file, "utf8").trim();
+    return token.length > 0 ? token : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const TOKEN = readToken();
 
 export class WikiError extends Error {
   constructor(
@@ -130,22 +149,69 @@ export interface WikiPage {
   updatedAt: string;
 }
 
+/**
+ * Page content.
+ *
+ * GraphQL `singleByPath` is the clean path but is gated per-page (an API key
+ * without page rights gets `PageViewForbidden`). The public site renders the
+ * body server-side into `<template slot="contents">`, so we fall back to that:
+ * no credentials needed for public pages.
+ */
 export async function wikiPage(path: string, locale = "zh"): Promise<WikiPage | null> {
-  const data = await gql<unknown>(
-    `query($path: String!, $locale: String!) { pages { singleByPath(path: $path, locale: $locale) { id title path description content createdAt updatedAt } } }`,
-    { path, locale },
-  );
-  const parsed = Page.safeParse(data);
-  if (!parsed.success) throw new WikiError(`Wiki 页面结构异常：${parsed.error.message.slice(0, 120)}`, "parse_drift");
-  const page = parsed.data.pages.singleByPath;
-  if (!page) return null;
+  if (TOKEN) {
+    try {
+      const data = await gql<unknown>(
+        `query($path: String!, $locale: String!) { pages { singleByPath(path: $path, locale: $locale) { id title path description content createdAt updatedAt } } }`,
+        { path, locale },
+      );
+      const parsed = Page.safeParse(data);
+      if (parsed.success && parsed.data.pages.singleByPath) {
+        const page = parsed.data.pages.singleByPath;
+        return {
+          id: page.id,
+          title: page.title,
+          path: page.path,
+          description: page.description ?? null,
+          content: page.content,
+          createdAt: page.createdAt,
+          updatedAt: page.updatedAt,
+        };
+      }
+    } catch (cause) {
+      if (!(cause instanceof WikiError) || cause.code !== "forbidden") throw cause;
+      // fall through to the rendered page
+    }
+  }
+  return wikiPageFromHtml(path, locale);
+}
+
+function htmlToText(html: string): string {
+  const s = html
+    .replace(/<a[^>]*class="toc-anchor"[^>]*>[\s\S]*?<\/a>/gi, "")
+    .replace(/<\/(p|div|li|h[1-6]|tr|blockquote|pre)>/gi, "\n")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<li[^>]*>/gi, "- ")
+    .replace(/<h([1-6])[^>]*>/gi, (_m, level: string) => `\n${"#".repeat(Number(level))} `)
+    .replace(/<[^>]+>/g, "");
+  return decodeEntities(s).replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+async function wikiPageFromHtml(path: string, locale: string): Promise<WikiPage | null> {
+  const url = `${WIKI_BASE}/${encodeURIComponent(locale)}/${path.split("/").map(encodeURIComponent).join("/")}`;
+  const res = await fetch(url, { headers: { "user-agent": "Mozilla/5.0" }, signal: AbortSignal.timeout(15_000) });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new WikiError(`Wiki 页面返回 HTTP ${res.status}`, String(res.status));
+  const html = await res.text();
+  const body = html.match(/<template[^>]*slot="contents"[^>]*>([\s\S]*?)<\/template>/i)?.[1];
+  if (!body) throw new WikiError(`Wiki 页面未包含渲染内容（${html.length} 字节）`, "parse_drift");
+  const title = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1];
   return {
-    id: page.id,
-    title: page.title,
-    path: page.path,
-    description: page.description ?? null,
-    content: page.content,
-    createdAt: page.createdAt,
-    updatedAt: page.updatedAt,
+    id: 0,
+    title: title ? decodeEntities(title.replace(/<[^>]+>/g, "")).replace(/¶/g, "").trim() : path,
+    path,
+    description: null,
+    content: htmlToText(body),
+    createdAt: "",
+    updatedAt: "",
   };
 }
