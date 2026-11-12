@@ -1,5 +1,7 @@
 # shanghaitech-mcp
 
+![docker](https://github.com/ShanghaitechGeekPie/shanghaitech-mcp/actions/workflows/docker.yml/badge.svg)
+
 上海科技大学校园 MCP 服务器。一个部署在 Vercel 上的 MCP 端点，通过校园统一身份认证（IDS）确认「你是哪个学生」，然后把各校园平台的能力封装成 MCP 工具。
 
 ## 现状
