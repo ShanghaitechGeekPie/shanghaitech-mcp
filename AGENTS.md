@@ -138,6 +138,10 @@ Campus hosts are reached **through the machine's HTTP proxy** in this environmen
 - `.github/workflows/docker.yml`: builds on PR (with `load: true` + a `tools/list` smoke test) and pushes `ghcr.io/<repo>` on `main`/tags with gha cache.
 - `pnpm build` runs inside the image build, so a type error fails CI.
 
+## Kubernetes
+
+`deploy/k8s/` holds a kustomize base + example overlay: app Deployment/Service/Ingress/HPA/PDB, an in-cluster Redis StatefulSet, and `serverless-redis-http` (Upstash REST ↔ Redis bridge) because the app speaks `@upstash/redis`. Supported alternative: drop the two Redis manifests and point `UPSTASH_REDIS_REST_URL/TOKEN` at a hosted Upstash. Keep `proxy-buffering: off` and ≥300s ingress timeouts — MCP responses stream.
+
 ## Testing & QA
 
 - No unit-test framework yet. Gates before pushing: `pnpm lint` (tsc) and `pnpm build`, then `scripts/smoke-mcp.sh` against a running build.

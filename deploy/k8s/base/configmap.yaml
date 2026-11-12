@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mcp-config
+data:
+  # Non-secret configuration. Values are the same defaults the app ships with;
+  # override per cluster with a kustomize patch if your network differs.
+  IDS_BASE_URL: "https://ids.shanghaitech.edu.cn"
+  COURSEBENCH_BASE_URL: "https://coursebench.zambar.dev"
+  ELEARNING_BASE_URL: "https://elearning.shanghaitech.edu.cn:8443"
+  ELRC_BASE_URL: "https://elrc.shanghaitech.edu.cn"
+  WIKI_BASE_URL: "https://wiki.geekpie.club"
+  # Campus LAN print platform: only reachable from a cluster whose egress is on
+  # campus. Leave empty to disable the print tools' network calls.
+  PRINT_BASE_URL: "http://10.15.21.225"
+  # In-cluster Redis REST bridge (serverless-redis-http), not Upstash.
+  UPSTASH_REDIS_REST_URL: "http://redis-http:80"
+  NODE_ENV: "production"
+  PORT: "3000"
+  HOSTNAME: "0.0.0.0"

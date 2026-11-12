@@ -143,6 +143,17 @@ GitHub Actions（`.github/workflows/docker.yml`）：push 到 `main` / `v*` tag 
 docker pull ghcr.io/hezebang/shanghaitech-mcp:latest
 ```
 
+## Kubernetes
+
+```bash
+kubectl create namespace shanghaitech-mcp
+kubectl -n shanghaitech-mcp create secret generic mcp-secrets \
+  --from-literal=MCP_ENC_KEY="$(openssl rand -base64 32)"
+kubectl apply -k deploy/k8s/overlays/example
+```
+
+模板含应用（HPA 2–8 副本）、内置 Redis + Upstash REST 桥（无需外部账号）、Ingress（SSE 已关闭 buffering）、PDB 与 Secret 示例。详见 [`deploy/k8s/README.md`](deploy/k8s/README.md)。
+
 ## 客户端接入
 
 IDE / CLI（Cursor、Claude Code、Codex …）：

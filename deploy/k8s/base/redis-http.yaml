@@ -1,0 +1,75 @@
+# The app talks to Redis through the Upstash REST API (@upstash/redis).
+# serverless-redis-http translates that REST protocol to plain Redis, so the
+# in-cluster setup needs no application changes and no external Upstash account.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-http
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis-http
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis-http
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+        - name: serverless-redis-http
+          image: hiett/serverless-redis-http:latest
+          env:
+            - name: SRH_MODE
+              value: env
+            - name: SRH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-secrets
+                  key: REDIS_REST_TOKEN
+            - name: SRH_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-secrets
+                  key: REDIS_CONNECTION_STRING
+          ports:
+            - name: http
+              containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-http
+spec:
+  selector:
+    app.kubernetes.io/name: redis-http
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
