@@ -1,38 +1,18 @@
-import { readFileSync } from "node:fs";
 import { decodeEntities } from "./html";
 import { z } from "zod";
 
 /**
  * WikiTech (wiki.geekpie.club) — Wiki.js 2.x.
  *
- * GraphQL at `${WIKI_BASE_URL}/graphql`.
- *   - `pages.list` / `pages.search` are readable anonymously (verified).
- *   - `pages.singleByPath(path, locale)` returns PageViewForbidden unless the
- *     request carries an API key: create one in Wiki.js admin → API Access and
- *     set `WIKI_API_TOKEN` (header `Authorization: Bearer <key>`).
+ * Search goes through GraphQL (`pages.search`, anonymous). Page content does
+ * NOT: `pages.singleByPath` is gated server-side on this deployment — an
+ * Administrator API key still gets `PageViewForbidden 6013` — so the body is
+ * taken from the public rendered page (`<template slot="contents">`).
  *
- * Locale is mandatory for singleByPath; the site's default content is `zh`.
+ * No credentials are needed or accepted.
  */
 
 export const WIKI_BASE = (process.env.WIKI_BASE_URL ?? "https://wiki.geekpie.club").replace(/\/+$/, "");
-
-/**
- * API key lookup: env first, then a local file so the key never has to be
- * pasted into a chat or committed. Vercel uses the env var only.
- */
-function readToken(): string | undefined {
-  const fromEnv = process.env.WIKI_API_TOKEN?.trim();
-  if (fromEnv) return fromEnv;
-  const file = process.env.WIKI_TOKEN_FILE ?? `${process.env.HOME ?? ""}/.config/shanghaitech-mcp/wiki.token`;
-  try {
-    const token = readFileSync(file, "utf8").trim();
-    return token.length > 0 ? token : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-const TOKEN = readToken();
 
 export class WikiError extends Error {
   constructor(
@@ -50,12 +30,9 @@ interface GraphQLResponse<T> {
 }
 
 async function gql<T>(query: string, variables: Record<string, unknown> = {}): Promise<T> {
-  const headers: Record<string, string> = { "content-type": "application/json" };
-  if (TOKEN) headers.authorization = `Bearer ${TOKEN}`;
-
   const res = await fetch(`${WIKI_BASE}/graphql`, {
     method: "POST",
-    headers,
+    headers: { "content-type": "application/json" },
     body: JSON.stringify({ query, variables }),
     signal: AbortSignal.timeout(15_000),
   });
@@ -63,12 +40,7 @@ async function gql<T>(query: string, variables: Record<string, unknown> = {}): P
   if (body.errors?.length) {
     const message = body.errors[0]?.message ?? "unknown error";
     if (/not authorized|forbidden/i.test(message)) {
-      throw new WikiError(
-        TOKEN
-          ? `Wiki 拒绝访问（${message}）：API key 可能缺少 pages:read 权限`
-          : "Wiki 页面内容需要 API key：在 Wiki.js 管理后台 → API Access 创建 key，设置 WIKI_API_TOKEN",
-        "forbidden",
-      );
+      throw new WikiError(`Wiki 拒绝访问（${message}）`, "forbidden");
     }
     throw new WikiError(`Wiki GraphQL 错误：${message}`, "graphql_error");
   }
@@ -122,23 +94,6 @@ export async function wikiSearch(query: string): Promise<{ totalHits: number; su
   };
 }
 
-const Page = z.object({
-  pages: z.object({
-    singleByPath: z
-      .object({
-        id: z.number(),
-        title: z.string(),
-        path: z.string(),
-        description: z.string().nullable().optional(),
-        content: z.string(),
-        createdAt: z.string(),
-        updatedAt: z.string(),
-      })
-      .loose()
-      .nullable(),
-  }),
-});
-
 export interface WikiPage {
   id: number;
   title: string;
@@ -152,41 +107,11 @@ export interface WikiPage {
 /**
  * Page content.
  *
- * GraphQL `singleByPath` is the clean path but is gated per-page (an API key
- * without page rights gets `PageViewForbidden`). The public site renders the
- * body server-side into `<template slot="contents">`, so we fall back to that:
- * no credentials needed for public pages.
+ * GraphQL `singleByPath` is gated server-side on this deployment (even an
+ * Administrator API key gets PageViewForbidden 6013), so content comes from the
+ * public rendered page: the body lives in `<template slot="contents">`.
  */
-let graphqlPageBlocked = false;
-
 export async function wikiPage(path: string, locale = "zh"): Promise<WikiPage | null> {
-  if (TOKEN && !graphqlPageBlocked) {
-    try {
-      const data = await gql<unknown>(
-        `query($path: String!, $locale: String!) { pages { singleByPath(path: $path, locale: $locale) { id title path description content createdAt updatedAt } } }`,
-        { path, locale },
-      );
-      const parsed = Page.safeParse(data);
-      if (parsed.success && parsed.data.pages.singleByPath) {
-        const page = parsed.data.pages.singleByPath;
-        return {
-          id: page.id,
-          title: page.title,
-          path: page.path,
-          description: page.description ?? null,
-          content: page.content,
-          createdAt: page.createdAt,
-          updatedAt: page.updatedAt,
-        };
-      }
-    } catch (cause) {
-      if (!(cause instanceof WikiError) || cause.code !== "forbidden") throw cause;
-      // This deployment blocks page content over GraphQL even for admin keys
-      // (verified: Administrator + list/tree OK, singleByPath → 6013). Remember
-      // it so we do not pay a failed round trip on every read.
-      graphqlPageBlocked = true;
-    }
-  }
   return wikiPageFromHtml(path, locale);
 }
 
