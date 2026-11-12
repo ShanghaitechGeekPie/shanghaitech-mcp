@@ -192,3 +192,7 @@ pnpm check:surface    # 默认 http://127.0.0.1:3000/api/mcp
 
 - 邮件（Coremail，强制二次验证）、图书馆（Primo VE，自有 apikey）、OJ（Hydro）、VPN（Sangfor aTrust）不走 IDS SSO，需要单独适配。
 - Blackboard / Gradescope / 体育馆预约等只有校内可达，直接从 Vercel 访问会失败。
+
+## License
+
+MIT © ShanghaiTech GeekPie
