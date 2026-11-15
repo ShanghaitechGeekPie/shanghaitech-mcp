@@ -172,6 +172,42 @@ IDE / CLI（Cursor、Claude Code、Codex …）：
 
 claude.ai / ChatGPT 这类托管客户端不支持自定义 header，需要等 OAuth 2.1 那一步（见下）。
 
+### 凭据 Bearer（`MCP_PASSWORD_AUTH=1`）
+
+把 IDS 学号密码直接当 bearer：服务端替你登录、按用户缓存 TGT，客户端不需要再调 `ids_login`。
+
+```
+Authorization: Bearer 2023533139:<IDS 密码>
+```
+
+- 解析规则：第一个 `:` 分隔，密码里可以有 `:`。
+- 服务端只在请求内使用密码，Redis 里存的是 `CASTGC`（键为 `sha256(学号)`），按 12h 过期；过期后下一次工具调用会自动静默重登。
+- 触发 IDS 验证码（风控）时无法无交互完成，会返回一条明确错误，改用 `ids_login` 带验证码登录一次即可。
+- 代价（需明确接受）：**密码会落在客户端配置里**（Cursor 的 `mcp.json`、LibreChat 的数据库等），也会出现在任何打印 header 的日志里。静态 `MCP_AUTH_TOKEN` 仍然可用。
+
+### LibreChat
+
+用 `customUserVars` 让每个用户填自己的学号密码，服务端即可按人隔离：
+
+```yaml
+mcpServers:
+  shanghaitech:
+    type: streamable-http
+    url: https://<deployment>/api/mcp
+    requiresOAuth: false          # 否则它会尝试 OAuth 探测
+    headers:
+      Authorization: 'Bearer {{SHTECH_CREDENTIAL}}'
+    customUserVars:
+      SHTECH_CREDENTIAL:
+        title: 'IDS 学号:密码'
+        description: '格式 学号:密码，仅用于建立校园会话；例如 2023533139:your-password'
+        sensitive: true
+    serverInstructions: true
+    timeout: 120000
+```
+
+不想让用户交密码时，改用 `Authorization: 'Bearer ${MCP_AUTH_TOKEN}'`（管理员共享 token），用户仍需在对话里调用一次 `ids_login`。
+
 ## 路线图
 
 1. **会话 → 平台适配器**：用 `session` 里的 `CASTGC` 换 EAMS、eGate、eCourse 的 service ticket，封装为 `eams_*`、`egate_*`、`ecourse_*` 工具。
