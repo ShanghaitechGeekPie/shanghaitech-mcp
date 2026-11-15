@@ -20,6 +20,20 @@ spec:
       labels:
         app.kubernetes.io/name: shanghaitech-mcp
     spec:
+      # Campus platforms only accept connections from campus networks; the
+      # cluster's egress is not one of them. 119.78.254.196 (acm.shanghaitech.edu.cn)
+      # relays TLS by SNI (see README "校园网出口"), so the pods resolve the
+      # campus hostnames to that entry and reach the real servers end to end.
+      hostAliases:
+        - ip: 119.78.254.196
+          hostnames:
+            - ids.shanghaitech.edu.cn
+            - ecourse.shanghaitech.edu.cn
+            - eams.shanghaitech.edu.cn
+            - egate.shanghaitech.edu.cn
+            - elearning.shanghaitech.edu.cn
+            - elrc.shanghaitech.edu.cn
+            - libspace.shanghaitech.edu.cn
       securityContext:
         runAsNonRoot: true
         runAsUser: 1001

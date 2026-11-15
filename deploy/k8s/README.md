@@ -84,7 +84,31 @@ curl -s -X POST http://127.0.0.1:8080/api/mcp \
    ```
 6. **只读根文件系统**：容器以 uid 1001、`readOnlyRootFilesystem: true` 运行，只为 `/app/.next/cache` 和 `/tmp` 挂了 emptyDir；如果以后引入需要写盘的功能，记得补挂载。
 
-7. **校园网可达性是硬前提**：`*.shanghaitech.edu.cn` 是 split-horizon DNS——校园网内解析到 `10.15.x`，公网解析到校园出口 IP，而后者只对校园来源放行。实测某集群（节点不在校园网段）：pod 能拉镜像、能访问 GitHub，但 `ids.shanghaitech.edu.cn` / `ecourse` 全部 `ETIMEDOUT`；把集群放在校园网内、给 pod 配校园出口（NAT 或 `HTTPS_PROXY` 指向可达的代理），否则所有 campus 工具都会返回 `fetch failed`。`tools/list`、鉴权、`401` 这些不依赖上游，所以「端点能连」不代表「工具能用」。
+7. **校园网出口走 acm 的 SNI 反代**：`*.shanghaitech.edu.cn` 只接受校园网来源的连接，本集群的出口（119.78.253.23）不在允许范围，直接解析公网 IP 只会 `ETIMEDOUT`。现方案复用 acm 机器（`acm.shanghaitech.edu.cn`，入口 `119.78.254.196`）的 nginx `stream` 按 SNI 转发：
+
+   ```nginx
+   upstream c_ids { server 10.15.44.192:443; }          # ids / egate
+   upstream c_ecourse { server 10.15.145.187:443; }
+   upstream c_eams { server 10.15.44.85:443; }
+   upstream c_elearning { server 10.15.45.24:443; }
+   upstream c_elrc { server 10.15.145.44:443; }
+   upstream c_libspace { server 10.15.145.161:443; }
+
+   map $ssl_preread_server_name $backend_name {
+       ids.shanghaitech.edu.cn        c_ids;
+       egate.shanghaitech.edu.cn      c_ids;
+       ecourse.shanghaitech.edu.cn    c_ecourse;
+       eams.shanghaitech.edu.cn       c_eams;
+       elearning.shanghaitech.edu.cn  c_elearning;
+       elrc.shanghaitech.edu.cn       c_elrc;
+       libspace.shanghaitech.edu.cn   c_libspace;
+       ...原有条目...
+   }
+   ```
+
+   配合 Deployment 的 `hostAliases`（`deploy/k8s/base/app.yaml`）把这几个域名钉到 `119.78.254.196`。TLS 是透传的，证书/SNI/Host/Cookie 域全部保持原样，应用代码不需要任何代理配置。
+
+   注意：**上游 IP 是硬编码的**，校园内 DNS 变了要同步改 acm 的 nginx；`10.15.21.225`（文印，纯 HTTP、无 SNI）无法走这条链路，`print_*` 仍需别的通道。集群自身能拉镜像/访问公网，只是到不了校园内网，所以别把这条当成通用出站代理。
 
 ## 换用托管 Upstash
 
