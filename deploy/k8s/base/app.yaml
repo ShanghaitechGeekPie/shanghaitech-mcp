@@ -43,7 +43,8 @@ spec:
       containers:
         - name: mcp
           image: ghcr.io/shanghaitechgeekpie/shanghaitech-mcp:latest
-          imagePullPolicy: IfNotPresent
+          # `:latest` + IfNotPresent keeps a stale image after a rollout restart.
+          imagePullPolicy: Always
           envFrom:
             - configMapRef:
                 name: mcp-config
