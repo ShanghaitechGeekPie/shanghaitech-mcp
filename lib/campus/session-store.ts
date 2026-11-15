@@ -179,7 +179,17 @@ export async function platformAuth(handle: string, platform: PlatformKey): Promi
   const root = await getRoot(sid);
   if (!root) throw new CampusSessionExpired("会话已过期（ticket 失效），请重新 ids_login");
 
+  const castgcBefore = root.cookies.CASTGC;
   const auth = await DERIVERS[platform](root.cookies);
   await putDerived(sid, platform, auth);
+
+  // CAS rotates the TGT on some SSO hops. The deriver mutates `root.cookies`
+  // in place, so persisting it when `CASTGC` changed keeps the session alive
+  // past the expiry of the ticket it started with — the only renewal the IDS
+  // allows without the password.
+  const castgcNow = root.cookies.CASTGC;
+  if (castgcNow && castgcNow !== castgcBefore) {
+    await putRoot(sid, { userId: root.userId, cookies: root.cookies });
+  }
   return auth;
 }

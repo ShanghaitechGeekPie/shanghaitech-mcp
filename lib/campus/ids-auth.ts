@@ -221,6 +221,7 @@ export async function login(input: LoginInput): Promise<LoginOutcome> {
     password: encryptPassword(input.password, salt),
     captcha: input.captcha ?? "",
     _eventId: "submit",
+    rememberMe: "true",
     cllt: "userNameLogin",
     dllt: "generalLogin",
     lt,
