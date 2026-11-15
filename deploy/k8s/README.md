@@ -75,14 +75,16 @@ curl -s -X POST http://127.0.0.1:8080/api/mcp \
 2. **文印系统在校内网**（`10.15.21.225`）：只有出口在校园网、或能路由到该网段的集群才能用 `print_*` 工具，否则会超时。其余平台公网可达。
 3. **会话 TTL**：ticket 12h、派生会话 30min，由应用自己续签，和副本数无关（状态都在 Redis）。
 4. **SSE/长请求**：Ingress 已设 `proxy-buffering: off` 与 300s 超时；工具调用最慢的是 EAMS/ELRC 抓取，别把 ingress 超时调到 60s 以下。
-5. **镜像可见性**：`ghcr.io/shanghaitechgeekpie/shanghaitech-mcp` 目前是私有包，部署前要么把包设为 Public，要么建 pull secret：
+5. **镜像可见性**：`ghcr.io/shanghaitechgeekpie/shanghaitech-mcp` 现在是 public 包，不需要 `imagePullSecret`。如果哪天组织策略要求改回 private，再建 secret 并挂回 `imagePullSecrets`：
    ```bash
    kubectl -n shanghaitech-mcp create secret docker-registry ghcr \
-     --docker-server=ghcr.io --docker-username=<user> --docker-password=<PAT>
+     --docker-server=ghcr.io --docker-username=<user> --docker-password=<只勾 read:packages 的 PAT>
    kubectl -n shanghaitech-mcp patch deploy/mcp \
      -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"ghcr"}]}}}}'
    ```
 6. **只读根文件系统**：容器以 uid 1001、`readOnlyRootFilesystem: true` 运行，只为 `/app/.next/cache` 和 `/tmp` 挂了 emptyDir；如果以后引入需要写盘的功能，记得补挂载。
+
+7. **校园网可达性是硬前提**：`*.shanghaitech.edu.cn` 是 split-horizon DNS——校园网内解析到 `10.15.x`，公网解析到校园出口 IP，而后者只对校园来源放行。实测某集群（节点不在校园网段）：pod 能拉镜像、能访问 GitHub，但 `ids.shanghaitech.edu.cn` / `ecourse` 全部 `ETIMEDOUT`；把集群放在校园网内、给 pod 配校园出口（NAT 或 `HTTPS_PROXY` 指向可达的代理），否则所有 campus 工具都会返回 `fetch failed`。`tools/list`、鉴权、`401` 这些不依赖上游，所以「端点能连」不代表「工具能用」。
 
 ## 换用托管 Upstash
 
